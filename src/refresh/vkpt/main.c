@@ -407,7 +407,9 @@ const char *vk_requested_instance_extensions[] = {
 };
 
 const char *vk_requested_device_extensions[] = {
-	VK_NV_RAY_TRACING_EXTENSION_NAME,
+	VK_KHR_RAY_TRACING_EXTENSION_NAME,
+	VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
+	VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 #ifdef VKPT_ENABLE_VALIDATION
 	VK_EXT_DEBUG_MARKER_EXTENSION_NAME,
@@ -889,7 +891,7 @@ init_vulkan()
 		Com_Printf("Supported Vulkan device extensions:\n");
 		for(int j = 0; j < num_ext; j++) {
 			Com_Printf("  %s\n", ext_properties[j].extensionName);
-			if(!strcmp(ext_properties[j].extensionName, VK_NV_RAY_TRACING_EXTENSION_NAME)) {
+			if(!strcmp(ext_properties[j].extensionName, VK_KHR_RAY_TRACING_EXTENSION_NAME)) {
 				if(picked_device < 0)
 					picked_device = i;
 			}
@@ -1019,9 +1021,21 @@ init_vulkan()
 	}
 #endif
 
+	VkPhysicalDeviceRayTracingFeaturesKHR physical_device_rt_features = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_FEATURES_KHR,
+		.pNext = &idx_features,
+		.rayTracing = VK_TRUE
+	};
+
+	VkPhysicalDeviceBufferDeviceAddressFeatures physical_device_address_features = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+		.pNext = &physical_device_rt_features,
+		.bufferDeviceAddress = VK_TRUE
+	};
+
 	VkPhysicalDeviceFeatures2 device_features = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR,
-		.pNext = &idx_features,
+		.pNext = &physical_device_address_features,
 
 		.features = {
 			.robustBufferAccess = 1,
@@ -3274,8 +3288,7 @@ R_BeginRegistration_RTX(const char *name)
 	_VK(vkpt_pt_destroy_static());
 	const bsp_mesh_t *m = &vkpt_refdef.bsp_mesh_world;
 	_VK(vkpt_pt_create_static(
-		qvk.buf_vertex_bsp.buffer, 
-		offsetof(BspVertexBuffer, positions_bsp), 
+		qvk.buf_vertex_bsp.address + offsetof(BspVertexBuffer, positions_bsp),
 		m->world_idx_count, 
 		m->world_transparent_count,
 		m->world_sky_count,
