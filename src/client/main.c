@@ -1757,12 +1757,14 @@ Called after all downloads are done. Not used for demos.
 void CL_Begin(void)
 {
 #if USE_REF == REF_GL
+#ifdef GLOOMHACK
     if (!Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
         gl_modulate_world->flags |= CVAR_CHEAT;
         gl_modulate_entities->flags |= CVAR_CHEAT;
         gl_brightness->flags |= CVAR_CHEAT;
     }
+#endif
 #endif
 
     Cvar_FixCheats();

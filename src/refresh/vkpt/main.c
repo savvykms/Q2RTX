@@ -104,6 +104,16 @@ static qboolean frame_ready = qfalse;
 static float sky_rotation = 0.f;
 static vec3_t sky_axis = { 0.f };
 
+static dlight_t entlights[MAX_ENTLIGHTS];
+static int num_entlights = 0;
+
+typedef struct EntityKVPair_s {
+//	char* key;
+//	char* value;
+	char key[256];
+	char value[256];
+} EntityKVPair_t;
+
 typedef enum {
 	VKPT_INIT_DEFAULT            = (0),
 	VKPT_INIT_SWAPCHAIN_RECREATE = (1 << 1),
@@ -1343,10 +1353,10 @@ add_dlights(const dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
 {
 	ubo->num_sphere_lights = 0;
 
-	for (int i = 0; i < num_lights; i++)
+	for (int i = 0; i < num_lights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
 	{
 		const dlight_t* light = lights + i;
-
+		
 		float* dynlight_data = (float*)(ubo->sphere_light_data + ubo->num_sphere_lights * 2);
 		float* center = dynlight_data;
 		float* radius = dynlight_data + 3;
@@ -1356,6 +1366,329 @@ add_dlights(const dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
 		VectorCopy(light->origin, center);
 		VectorScale(light->color, light->intensity / 25.f, color);
 		*radius = light->radius;
+
+		ubo->num_sphere_lights++;
+	}
+}
+
+
+#define COM_PARSE_OLD_MAX_TOKEN_CHARS 128
+char	com_token_internal[COM_PARSE_OLD_MAX_TOKEN_CHARS];
+
+char* COM_Parse_old(char** data_p)
+{
+	int		c;
+	int		len;
+	char* data;
+
+	data = *data_p;
+	len = 0;
+	com_token_internal[0] = 0;
+
+	if (!data)
+	{
+		*data_p = NULL;
+		return "";
+	}
+
+	// skip whitespace
+skipwhite:
+	while ((c = *data) <= ' ')
+	{
+		if (c == 0)
+		{
+			*data_p = NULL;
+			return "";
+		}
+		data++;
+	}
+
+	// skip // comments
+	if (c == '/' && data[1] == '/')
+	{
+		while (*data && *data != '\n')
+			data++;
+		goto skipwhite;
+	}
+
+
+	// handle quoted strings specially
+	if (c == '\"')
+	{
+		data++;
+		while (1)
+		{
+			c = *data++;
+			if (c == '\"' || !c)
+			{
+				com_token_internal[len] = 0;
+				*data_p = data;
+				return com_token_internal;
+			}
+			if (len < COM_PARSE_OLD_MAX_TOKEN_CHARS)
+			{
+				com_token_internal[len] = c;
+				len++;
+			}
+		}
+	}
+
+	// parse a regular word
+	do
+	{
+		if (len < COM_PARSE_OLD_MAX_TOKEN_CHARS)
+		{
+			com_token_internal[len] = c;
+			len++;
+		}
+		data++;
+		c = *data;
+	} while (c > 32);
+
+	if (len == COM_PARSE_OLD_MAX_TOKEN_CHARS)
+	{
+		//		Com_Printf ("Token exceeded %i chars, discarded.\n", MAX_TOKEN_CHARS);
+		len = 0;
+	}
+	com_token_internal[len] = 0;
+
+	*data_p = data;
+	return com_token_internal;
+}
+
+#define BSP_MAX_ENTITY_PROPERTIES 50
+static void
+bsp_add_entlights( bsp_t *bsp )
+{
+	char* entString;
+	char* com_token;
+	int el;
+	float entity_scale;
+
+	if ( bsp == NULL )
+		return;
+
+	//replicate algorithm from qrad3; would be best to be able to set entity_scale dynamically depending upon map
+	//so that original qrad parameters could be replicated here
+	entity_scale = 1.00f;
+
+	entString = bsp->entitystring;
+
+	//replicate SpawnEntities logic of game DLL, with regards to entity parsing
+
+	/*Example:
+	{
+	"style" "1"
+	"_color" "0.97 0.54 0.01"
+	"light" "300"
+	"origin" "-1632 320 256"
+	"classname" "light"
+	}
+	*/
+
+	//initialize all light values, even if not used
+	num_entlights = 0;
+	for (el = 0; el < MAX_ENTLIGHTS; el++)
+	{
+		dlight_t* elight;
+		elight = (dlight_t*)( entlights + el );
+		elight->origin[0] = 0.00f;
+		elight->origin[1] = 0.00f;
+		elight->origin[2] = 0.00f;
+		elight->transformed[0] = 0.00f;
+		elight->transformed[1] = 0.00f;
+		elight->transformed[2] = 0.00f;
+		elight->intensity = 300.0f; //original qrad3 default
+		elight->radius = elight->intensity * entity_scale;
+		elight->color[0] = 1.00f;
+		elight->color[1] = 1.00f;
+		elight->color[2] = 1.00f;
+	}
+
+	for (;;) //loop over entities
+	{
+		EntityKVPair_t keypairs[BSP_MAX_ENTITY_PROPERTIES];
+		int num_keypairs, i;
+		qboolean islight;
+		char* com_token_inner;
+		//char* inner;
+
+		num_keypairs = 0;
+		islight = qfalse;
+
+		com_token = COM_Parse_old(&entString);
+
+		if (!entString)
+		{
+			break;
+		}
+		if ( com_token[0] != '{' )
+		{
+			Com_LPrintf(PRINT_WARNING, "bsp_add_entlights: found %s when expecting {", com_token);
+		}
+
+		//inner = entString;
+		num_keypairs = 0;
+
+		//replicate ED_ParseEdict() logic of game DLL
+		for ( ;; ) //loop over properties
+		{
+			EntityKVPair_t keypair;
+
+			keypair.key[0] = '\0';
+			keypair.value[0] = '\0';
+			keypair.key[sizeof(keypair.key-1)] = '\0';
+			keypair.value[sizeof(keypair.value-1)] = '\0';
+
+			if (num_keypairs >= BSP_MAX_ENTITY_PROPERTIES)
+			{
+				break;
+			}
+
+			//get key
+
+			com_token_inner = COM_Parse_old(&entString);
+
+			if (com_token_inner[0] == '}')
+			{
+				break;
+			}
+			if (!entString)
+			{
+				Com_LPrintf(PRINT_WARNING, "bsp_add_entlights: EOF without closing brace");
+			}
+
+			strncpy(keypair.key, com_token_inner, sizeof(keypair.key) - 1);
+
+			//get value
+			
+			com_token_inner = COM_Parse_old(&entString);
+
+			if (!entString)
+			{
+				Com_LPrintf(PRINT_WARNING, "bsp_add_entlights: EOF without closing brace");
+			}
+
+			if (com_token_inner[0] == '}')
+			{
+				Com_LPrintf(PRINT_WARNING, "bsp_add_entlights: closing brace without data (2)");
+			}
+
+			strncpy(keypair.value, com_token_inner, sizeof(keypair.value) - 1);
+
+			keypairs[num_keypairs++] = keypair;
+		}
+
+		for (i = 0; i < num_keypairs; i++)
+		if ( !Q_stricmp(keypairs[i].key, "classname") && !Q_stricmp(keypairs[i].value, "light") )
+		{
+			islight = qtrue;
+		}
+
+		//only process light entities
+		if ( islight && num_entlights < MAX_ENTLIGHTS)
+		{
+			dlight_t* elight;
+			qboolean parse_error;
+
+			parse_error = qfalse;
+
+			//examples:
+			//"_color" "0.97 0.54 0.01"
+			//"light" "300" - F_INT
+			//"origin" "-1632 320 256" - F_VECTOR
+
+			elight = (dlight_t*)( entlights + i );
+			elight->intensity = 300.0f; //original qrad3 default
+			elight->radius = elight->intensity * entity_scale;
+			elight->color[0] = 1.00f;
+			elight->color[1] = 1.00f;
+			elight->color[2] = 1.00f;
+
+			for (i = 0; i < num_keypairs; i++)
+			{
+				if (!Q_stricmp(keypairs[i].key, "origin") || !Q_stricmp(keypairs[i].key, "_color"))
+				{
+					vec3_t vec;
+					vec3_t* v;
+
+					v = NULL;
+					vec[0] = 0.0f;
+					vec[1] = 0.0f;
+					vec[2] = 0.0f;
+
+					if (sscanf(keypairs[i].value, "%f %f %f", &vec[0], &vec[1], &vec[2]) != 3) {
+						//could not parse
+						parse_error = qtrue;
+						break;
+					}
+					if (!Q_stricmp(keypairs[i].key, "origin"))
+					{
+						v = &elight->origin;
+					}
+					else if (!Q_stricmp(keypairs[i].key, "_color"))
+					{
+						v = &elight->color;
+					}
+					else
+					{
+						//should be unreachable
+						parse_error = qtrue;
+						break;
+					}
+					*v[0] = vec[0];
+					*v[1] = vec[1];
+					*v[2] = vec[2];
+				}
+				else if (!Q_stricmp(keypairs[i].key, "light") || !Q_stricmp(keypairs[i].key, "_light"))
+				{
+					float f;
+					f = atof(keypairs[i].value);
+					if ( f == 0.0f )
+					{
+						parse_error = qtrue;
+						break;
+					}
+					
+					elight->intensity = f;
+					elight->radius = elight->intensity * entity_scale;
+				}
+				else if (!Q_stricmp(keypairs[i].key, "light_spot") || !Q_stricmp(keypairs[i].key, "target"))
+				{
+					//TODO: add in support for spot lights
+					//ignore spot lights for now
+					//additional spot light properties are "_cone" and "angle"; these should be interpretted like qrad3
+					parse_error = qtrue;
+				}
+			}
+
+			if ( !parse_error )
+			{
+				//if not correct, redo this light definition with the next we find
+				//e.g. effectively ignore bad lights
+				num_entlights++;
+			}
+		}
+	}
+}
+
+static void
+add_elights(dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
+{
+	for (int i = 0; i < num_lights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
+	{
+		dlight_t *elight = lights + i;
+
+		float* dynlight_data = (float*)(ubo->sphere_light_data + ubo->num_sphere_lights * 2);
+		float* center = dynlight_data;
+		float* radius = dynlight_data + 3;
+		float* color = dynlight_data + 4;
+		dynlight_data[7] = 0.f;
+
+		VectorCopy(elight->origin, center);
+		//VectorScale(elight->color, elight->intensity / 25.f, color);
+
+		*radius = elight->radius;
 
 		ubo->num_sphere_lights++;
 	}
@@ -2204,6 +2537,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	VectorCopy(sky_matrix[2], ubo->environment_rotation_matrix + 8);
 	
 	add_dlights(vkpt_refdef.fd->dlights, vkpt_refdef.fd->num_dlights, ubo);
+	//add_elights(entlights, num_entlights, ubo);
 
 	const bsp_mesh_t* wm = &vkpt_refdef.bsp_mesh_world;
 	if (wm->num_cameras > 0)
@@ -3251,7 +3585,9 @@ R_BeginRegistration_RTX(const char *name)
 	if(!bsp) {
 		Com_Error(ERR_DROP, "%s: couldn't load %s: %s", __func__, bsp_path, Q_ErrorString(ret));
 	}
+	num_entlights = 0;
 	bsp_world_model = bsp;
+	bsp_add_entlights(bsp);
 	bsp_mesh_register_textures(bsp);
 	bsp_mesh_create_from_bsp(&vkpt_refdef.bsp_mesh_world, bsp, name);
 	vkpt_light_stats_create(&vkpt_refdef.bsp_mesh_world);
