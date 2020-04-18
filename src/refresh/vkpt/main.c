@@ -253,6 +253,9 @@ vkpt_initialize_all(VkptInitFlags_t init_flags)
 			? (init->initialize() == VK_SUCCESS)
 			: 1;
 		assert(init->is_initialized);
+
+		if (!init->is_initialized)
+		  Com_Error(ERR_FATAL, "Couldn't initialize %s.\n", init->name);
 	}
 
 	if ((VKPT_INIT_DEFAULT & init_flags) == init_flags)
@@ -487,7 +490,7 @@ vk_debug_callback(
 		Com_EPrintf("~~~ ");
 		for (uint32_t i = 0; i < callback_data->cmdBufLabelCount; ++i)
 		{
-			VkDebugUtilsLabelEXT* label = &callback_data->pCmdBufLabels[i];
+			const VkDebugUtilsLabelEXT* label = &callback_data->pCmdBufLabels[i];
 			Com_EPrintf("%s ~ ", label->pLabelName);
 		}
 		Com_EPrintf("\n");
@@ -497,7 +500,7 @@ vk_debug_callback(
 	{
 		for (uint32_t i = 0; i < callback_data->objectCount; ++i)
 		{
-			VkDebugUtilsObjectNameInfoEXT* obj = &callback_data->pObjects[i];
+			const VkDebugUtilsObjectNameInfoEXT* obj = &callback_data->pObjects[i];
 			Com_EPrintf("--- %s %i\n", obj->pObjectName, (int32_t)obj->objectType);
 		}
 	}
