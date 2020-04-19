@@ -63,6 +63,7 @@ cvar_t *cvar_drs_maxscale = NULL;
 cvar_t *cvar_drs_adjust_up = NULL;
 cvar_t *cvar_drs_adjust_down = NULL;
 cvar_t *cvar_drs_gain = NULL;
+cvar_t *cvar_show_entlights = NULL;
 extern cvar_t *scr_viewsize;
 extern cvar_t *cvar_bloom_enable;
 static int drs_current_scale = 0;
@@ -1484,11 +1485,11 @@ bsp_add_entlights( const bsp_t *bsp )
 		elight->transformed[0] = 0.00f;
 		elight->transformed[1] = 0.00f;
 		elight->transformed[2] = 0.00f;
-		elight->intensity = 300.0f; //original qrad3 default
-		elight->radius = elight->intensity * entity_scale;
-		elight->color[0] = 1.00f;
-		elight->color[1] = 1.00f;
-		elight->color[2] = 1.00f;
+		elight->intensity = 0.00f;
+		elight->radius =0.00f;
+		elight->color[0] = 0.00f;
+		elight->color[1] = 0.00f;
+		elight->color[2] = 0.00f;
 	}
 
 	if ( bsp == NULL )
@@ -1676,7 +1677,7 @@ bsp_add_entlights( const bsp_t *bsp )
 }
 
 static void
-add_elights(QVKUniformBuffer_t* ubo)
+add_elights(refdef_t *fd, QVKUniformBuffer_t* ubo)
 {
 	for (int i = 0; i < num_entlights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
 	{
@@ -1694,6 +1695,23 @@ add_elights(QVKUniformBuffer_t* ubo)
 		*radius = elight->radius;
 
 		ubo->num_sphere_lights++;
+
+		if (cvar_show_entlights->integer && fd->num_particles < MAX_PARTICLES)
+		{
+			particle_t* part = fd->particles + (fd->num_particles * sizeof(particle_t) );
+
+			VectorCopy(elight->origin, part->origin);
+			part->radius = elight->radius;
+			part->brightness = max(elight->color[0], max(elight->color[1], elight->color[2]));
+			part->color = -1;
+			part->rgba.u8[0] = (uint8_t)max(0.00f, min(255.00f, elight->color[0] / part->brightness * 255.00f));
+			part->rgba.u8[1] = (uint8_t)max(0.00f, min(255.00f, elight->color[1] / part->brightness * 255.00f));
+			part->rgba.u8[2] = (uint8_t)max(0.00f, min(255.00f, elight->color[2] / part->brightness * 255.00f));
+			part->rgba.u8[3] = 255;
+			part->alpha = 1.00f;
+
+			fd->num_particles++;
+		}
 	}
 }
 
@@ -2540,7 +2558,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	VectorCopy(sky_matrix[2], ubo->environment_rotation_matrix + 8);
 	
 	add_dlights(vkpt_refdef.fd->dlights, vkpt_refdef.fd->num_dlights, ubo);
-	add_elights(ubo);
+	add_elights(vkpt_refdef.fd, ubo);
 
 	const bsp_mesh_t* wm = &vkpt_refdef.bsp_mesh_world;
 	if (wm->num_cameras > 0)
@@ -3251,6 +3269,8 @@ R_Init_RTX(qboolean total)
 
 	scr_viewsize = Cvar_Get("viewsize", "100", CVAR_ARCHIVE);
 	scr_viewsize->changed = viewsize_changed;
+
+	cvar_show_entlights = Cvar_Get("cl_show_entlights", "0", 0);
 
 	drs_init();
 
