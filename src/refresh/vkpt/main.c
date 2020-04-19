@@ -1461,19 +1461,38 @@ skipwhite:
 
 #define BSP_MAX_ENTITY_PROPERTIES 50
 static void
-bsp_add_entlights( bsp_t *bsp )
+bsp_add_entlights( const bsp_t *bsp )
 {
 	char* entString;
 	char* com_token;
 	int el;
 	float entity_scale;
 
-	if ( bsp == NULL )
-		return;
-
 	//replicate algorithm from qrad3; would be best to be able to set entity_scale dynamically depending upon map
 	//so that original qrad parameters could be replicated here
 	entity_scale = 1.00f;
+
+	//initialize all light values, even if not used
+	num_entlights = 0;
+	for (el = 0; el < MAX_ENTLIGHTS; el++)
+	{
+		dlight_t* elight;
+		elight = (dlight_t*)(entlights + (el * sizeof(dlight_t)));
+		elight->origin[0] = 0.00f;
+		elight->origin[1] = 0.00f;
+		elight->origin[2] = 0.00f;
+		elight->transformed[0] = 0.00f;
+		elight->transformed[1] = 0.00f;
+		elight->transformed[2] = 0.00f;
+		elight->intensity = 300.0f; //original qrad3 default
+		elight->radius = elight->intensity * entity_scale;
+		elight->color[0] = 1.00f;
+		elight->color[1] = 1.00f;
+		elight->color[2] = 1.00f;
+	}
+
+	if ( bsp == NULL )
+		return;
 
 	entString = bsp->entitystring;
 
@@ -1488,25 +1507,6 @@ bsp_add_entlights( bsp_t *bsp )
 	"classname" "light"
 	}
 	*/
-
-	//initialize all light values, even if not used
-	num_entlights = 0;
-	for (el = 0; el < MAX_ENTLIGHTS; el++)
-	{
-		dlight_t* elight;
-		elight = (dlight_t*)( entlights + el );
-		elight->origin[0] = 0.00f;
-		elight->origin[1] = 0.00f;
-		elight->origin[2] = 0.00f;
-		elight->transformed[0] = 0.00f;
-		elight->transformed[1] = 0.00f;
-		elight->transformed[2] = 0.00f;
-		elight->intensity = 300.0f; //original qrad3 default
-		elight->radius = elight->intensity * entity_scale;
-		elight->color[0] = 1.00f;
-		elight->color[1] = 1.00f;
-		elight->color[2] = 1.00f;
-	}
 
 	for (;;) //loop over entities
 	{
@@ -1601,7 +1601,7 @@ bsp_add_entlights( bsp_t *bsp )
 			//"light" "300" - F_INT
 			//"origin" "-1632 320 256" - F_VECTOR
 
-			elight = (dlight_t*)( entlights + i );
+			elight = (dlight_t*)( entlights + (i * sizeof(dlight_t)));
 			elight->intensity = 300.0f; //original qrad3 default
 			elight->radius = elight->intensity * entity_scale;
 			elight->color[0] = 1.00f;
@@ -1676,11 +1676,11 @@ bsp_add_entlights( bsp_t *bsp )
 }
 
 static void
-add_elights(dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
+add_elights(QVKUniformBuffer_t* ubo)
 {
-	for (int i = 0; i < num_lights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
+	for (int i = 0; i < num_entlights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
 	{
-		dlight_t *elight = lights + i;
+		dlight_t *elight = entlights + (i * sizeof(dlight_t));
 
 		float* dynlight_data = (float*)(ubo->sphere_light_data + ubo->num_sphere_lights * 2);
 		float* center = dynlight_data;
@@ -1689,7 +1689,7 @@ add_elights(dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
 		dynlight_data[7] = 0.f;
 
 		VectorCopy(elight->origin, center);
-		//VectorScale(elight->color, elight->intensity / 25.f, color);
+		VectorScale(elight->color, elight->intensity / 25.f, color);
 
 		*radius = elight->radius;
 
@@ -2540,7 +2540,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	VectorCopy(sky_matrix[2], ubo->environment_rotation_matrix + 8);
 	
 	add_dlights(vkpt_refdef.fd->dlights, vkpt_refdef.fd->num_dlights, ubo);
-	//add_elights(entlights, num_entlights, ubo);
+	add_elights(ubo);
 
 	const bsp_mesh_t* wm = &vkpt_refdef.bsp_mesh_world;
 	if (wm->num_cameras > 0)
@@ -3588,7 +3588,6 @@ R_BeginRegistration_RTX(const char *name)
 	if(!bsp) {
 		Com_Error(ERR_DROP, "%s: couldn't load %s: %s", __func__, bsp_path, Q_ErrorString(ret));
 	}
-	num_entlights = 0;
 	bsp_world_model = bsp;
 	bsp_add_entlights(bsp);
 	bsp_mesh_register_textures(bsp);
