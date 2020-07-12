@@ -38,7 +38,8 @@ static VkPhysicalDeviceRayTracingPropertiesKHR rt_properties = {
 	.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PROPERTIES_KHR,
 	.pNext = NULL,
 	.maxRecursionDepth     = 0, /* updated during init */
-	.shaderGroupHandleSize = 0
+	.shaderGroupHandleSize = 0,
+	.shaderGroupBaseAlignment = 0
 };
 
 typedef struct accel_bottom_match_info_s {
@@ -142,6 +143,7 @@ vkpt_pt_init()
 
 	Com_Printf("Maximum recursion depth: %d\n",  rt_properties.maxRecursionDepth);
 	Com_Printf("Shader group handle size: %d\n", rt_properties.shaderGroupHandleSize);
+	Com_Printf("Shader group alignment: %d\n", rt_properties.shaderGroupBaseAlignment);
 
 	buffer_create(&buf_accel_scratch, SIZE_SCRATCH_BUFFER, VK_BUFFER_USAGE_RAY_TRACING_BIT_KHR,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -1002,6 +1004,8 @@ vkpt_pt_create_toplevel(VkCommandBuffer cmd_buf, int idx, qboolean include_world
 
 static void setup_rt_pipeline(VkCommandBuffer cmd_buf)
 {
+	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rt_pipeline);
+
 	vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
 		rt_pipeline_layout, 0, 1, rt_descriptor_set + qvk.current_frame_index, 0, 0);
 
@@ -1014,8 +1018,6 @@ static void setup_rt_pipeline(VkCommandBuffer cmd_buf)
 
 	vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
 		rt_pipeline_layout, 3, 1, &qvk.desc_set_vertex_buffer, 0, 0);
-
-	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rt_pipeline);
 }
 
 VkResult
@@ -1044,15 +1046,15 @@ vkpt_pt_trace_primary_rays(VkCommandBuffer cmd_buf)
 
 		VkStridedBufferRegionKHR raygen = {
 			.buffer = buf_shader_binding_table.buffer,
-			.offset = SBT_RGEN_PRIMARY_RAYS * rt_properties.shaderGroupHandleSize,
-			.stride = rt_properties.shaderGroupHandleSize,
+			.offset = SBT_RGEN_PRIMARY_RAYS * rt_properties.shaderGroupBaseAlignment,
+			.stride = rt_properties.shaderGroupBaseAlignment,
 			.size   = rt_properties.shaderGroupHandleSize
 		};
 
 		VkStridedBufferRegionKHR miss_and_hit = {
 			.buffer = buf_shader_binding_table.buffer,
 			.offset = 0,
-			.stride = rt_properties.shaderGroupHandleSize,
+			.stride = rt_properties.shaderGroupBaseAlignment,
 			.size   = rt_properties.shaderGroupHandleSize
 		};
 
@@ -1112,15 +1114,15 @@ vkpt_pt_trace_reflections(VkCommandBuffer cmd_buf, int bounce)
 
 		VkStridedBufferRegionKHR raygen = {
 			.buffer = buf_shader_binding_table.buffer,
-			.offset = shader * rt_properties.shaderGroupHandleSize,
-			.stride = rt_properties.shaderGroupHandleSize,
+			.offset = shader * rt_properties.shaderGroupBaseAlignment,
+			.stride = rt_properties.shaderGroupBaseAlignment,
 			.size   = rt_properties.shaderGroupHandleSize
 		};
 
 		VkStridedBufferRegionKHR miss_and_hit = {
 			.buffer = buf_shader_binding_table.buffer,
 			.offset = 0,
-			.stride = rt_properties.shaderGroupHandleSize,
+			.stride = rt_properties.shaderGroupBaseAlignment,
 			.size   = rt_properties.shaderGroupHandleSize
 		};
 
@@ -1178,23 +1180,23 @@ vkpt_pt_trace_lighting(VkCommandBuffer cmd_buf, float num_bounce_rays)
 
 		VkStridedBufferRegionKHR raygen = {
 			.buffer = buf_shader_binding_table.buffer,
-			.offset = rgen_index * rt_properties.shaderGroupHandleSize,
-			.stride = rt_properties.shaderGroupHandleSize,
-			.size   = rt_properties.shaderGroupHandleSize
+			.offset = rgen_index * rt_properties.shaderGroupBaseAlignment,
+			.stride = rt_properties.shaderGroupBaseAlignment,
+			.size = rt_properties.shaderGroupHandleSize
 		};
 
 		VkStridedBufferRegionKHR miss_and_hit = {
 			.buffer = buf_shader_binding_table.buffer,
 			.offset = 0,
-			.stride = rt_properties.shaderGroupHandleSize,
-			.size   = rt_properties.shaderGroupHandleSize
+			.stride = rt_properties.shaderGroupBaseAlignment,
+			.size = rt_properties.shaderGroupHandleSize
 		};
 
 		VkStridedBufferRegionKHR callable = {
 			.buffer = VK_NULL_HANDLE,
 			.offset = 0,
 			.stride = 0,
-			.size   = 0
+			.size = 0
 		};
 
 		qvkCmdTraceRaysKHR(cmd_buf,
@@ -1247,15 +1249,15 @@ vkpt_pt_trace_lighting(VkCommandBuffer cmd_buf, float num_bounce_rays)
 
 				VkStridedBufferRegionKHR raygen = {
 					.buffer = buf_shader_binding_table.buffer,
-					.offset = rgen_index * rt_properties.shaderGroupHandleSize,
-					.stride = rt_properties.shaderGroupHandleSize,
+					.offset = rgen_index * rt_properties.shaderGroupBaseAlignment,
+					.stride = rt_properties.shaderGroupBaseAlignment,
 					.size   = rt_properties.shaderGroupHandleSize
 				};
 
 				VkStridedBufferRegionKHR miss_and_hit = {
 					.buffer = buf_shader_binding_table.buffer,
 					.offset = 0,
-					.stride = rt_properties.shaderGroupHandleSize,
+					.stride = rt_properties.shaderGroupBaseAlignment,
 					.size   = rt_properties.shaderGroupHandleSize
 				};
 
@@ -1490,15 +1492,28 @@ vkpt_pt_create_pipelines()
 	_VK(qvkCreateRayTracingPipelinesKHR(qvk.device, NULL, 1, &rt_pipeline_info, NULL, &rt_pipeline ));
 
 	uint32_t num_groups = LENGTH(rt_shader_group_info);
-	uint32_t shader_binding_table_size = rt_properties.shaderGroupHandleSize * num_groups;
 
-	/* pt */
+	// get the shader handles in a dense array from VK
+	uint32_t shader_handle_array_size = num_groups * rt_properties.shaderGroupHandleSize;
+	char* shader_handles = alloca(shader_handle_array_size);
+	_VK(qvkGetRayTracingShaderGroupHandlesKHR(qvk.device, rt_pipeline, 0, num_groups,
+		shader_handle_array_size, shader_handles));
+
+	// create the SBT buffer
+	uint32_t shader_binding_table_size = rt_properties.shaderGroupBaseAlignment * num_groups;
 	_VK(buffer_create(&buf_shader_binding_table, shader_binding_table_size,
 				VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT));
 
-	void *shader_binding_table = buffer_map(&buf_shader_binding_table);
-	_VK(qvkGetRayTracingShaderGroupHandlesKHR(qvk.device, rt_pipeline, 0, num_groups,
-				shader_binding_table_size, shader_binding_table));
+	// copy/unpack the shader handles into the SBT:
+	// shaderGroupBaseAlignment is likely greater than shaderGroupHandleSize (64 vs 32 on NV)
+	char* shader_binding_table = (char*)buffer_map(&buf_shader_binding_table);
+	for (uint32_t group = 0; group < num_groups; group++)
+	{
+		memcpy(
+			shader_binding_table + group * rt_properties.shaderGroupBaseAlignment, 
+			shader_handles + group * rt_properties.shaderGroupHandleSize, 
+			rt_properties.shaderGroupHandleSize);
+	}
 	buffer_unmap(&buf_shader_binding_table);
 	shader_binding_table = NULL;
 

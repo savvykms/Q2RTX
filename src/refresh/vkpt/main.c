@@ -394,7 +394,7 @@ _VK_EXTENSION_LIST
 
 #ifdef VKPT_ENABLE_VALIDATION
 const char *vk_requested_layers[] = {
-	"VK_LAYER_LUNARG_standard_validation"
+	"VK_LAYER_KHRONOS_validation"
 };
 #endif
 

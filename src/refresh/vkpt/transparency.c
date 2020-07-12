@@ -29,8 +29,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define TR_COLOR_SIZE          4 * sizeof(float)
 #define TR_SPRITE_INFO_SIZE    2 * sizeof(float)
 
-#define TR_BLAS_BUILD_FLAGS    VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR | \
-                               VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+#define TR_BLAS_BUILD_FLAGS    VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
 
 struct
 {
@@ -50,9 +49,6 @@ struct
 	unsigned int particle_num;
 	unsigned int beam_num;
 	unsigned int sprite_num;
-	unsigned int blas_beam_num;
-	unsigned int blas_particle_num;
-	unsigned int blas_sprite_num;
 	unsigned int host_frame_index;
 	unsigned int host_buffered_frame_num;
 	char* mapped_host_buffer;
@@ -703,7 +699,7 @@ static void upload_geometry(VkCommandBuffer command_buffer)
 
 static void update_particle_blas(VkCommandBuffer command_buffer)
 {
-	if (transparency.particle_num == 0 && transparency.blas_particle_num == 0)
+	if (transparency.particle_num == 0)
 		return;
 
 	uint32_t barrier_count = 0;
@@ -737,15 +733,13 @@ static void update_particle_blas(VkCommandBuffer command_buffer)
 		.geometry = geometry_data
 	};
 
-	const VkBool32 update = transparency.blas_particle_num == transparency.particle_num ? VK_TRUE : VK_FALSE;
-
 	const VkAccelerationStructureGeometryKHR* geometries = &geometry;
 
 	const VkAccelerationStructureBuildGeometryInfoKHR info = {
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
 		.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
 		.flags = TR_BLAS_BUILD_FLAGS,
-		.update = update,
+		.update = VK_FALSE,
 		.srcAccelerationStructure = transparency.particle_blas,
 		.dstAccelerationStructure = transparency.particle_blas,
 		.geometryArrayOfPointers = VK_TRUE,
@@ -753,8 +747,6 @@ static void update_particle_blas(VkCommandBuffer command_buffer)
 		.ppGeometries = &geometries,
 		.scratchData = transparency.scratch_buffer_address
 	};
-
-	transparency.blas_particle_num = transparency.particle_num;
 
 	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.beam_num * 2 };
 
@@ -765,7 +757,7 @@ static void update_particle_blas(VkCommandBuffer command_buffer)
 
 static void update_beam_blas(VkCommandBuffer command_buffer)
 {
-	if (transparency.beam_num == 0 && transparency.blas_beam_num == 0)
+	if (transparency.beam_num == 0)
 		return;
 
 	const VkAccelerationStructureGeometryTrianglesDataKHR triangles = {
@@ -785,15 +777,13 @@ static void update_beam_blas(VkCommandBuffer command_buffer)
 		.geometry = geometry_data
 	};
 
-	const VkBool32 update = transparency.blas_beam_num == transparency.beam_num ? VK_TRUE : VK_FALSE;
-
 	const VkAccelerationStructureGeometryKHR* geometries = &geometry;
 
 	const VkAccelerationStructureBuildGeometryInfoKHR info = {
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
 		.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
 		.flags = TR_BLAS_BUILD_FLAGS,
-		.update = update,
+		.update = VK_FALSE,
 		.srcAccelerationStructure = transparency.beam_blas,
 		.dstAccelerationStructure = transparency.beam_blas,
 		.geometryArrayOfPointers = VK_TRUE,
@@ -801,8 +791,6 @@ static void update_beam_blas(VkCommandBuffer command_buffer)
 		.ppGeometries = &geometries,
 		.scratchData = transparency.scratch_buffer_address + transparency.beam_scratch_device_offset,
 	};
-
-	transparency.blas_beam_num = transparency.beam_num;
 
 	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.beam_num * 2 };
 
@@ -813,7 +801,7 @@ static void update_beam_blas(VkCommandBuffer command_buffer)
 
 static void update_sprite_blas(VkCommandBuffer command_buffer)
 {
-	if (transparency.sprite_num == 0 && transparency.blas_sprite_num == 0)
+	if (transparency.sprite_num == 0)
 		return;
 
 	const VkAccelerationStructureGeometryTrianglesDataKHR triangles = {
@@ -833,15 +821,13 @@ static void update_sprite_blas(VkCommandBuffer command_buffer)
 		.geometry = geometry_data
 	};
 
-	const VkBool32 update = transparency.blas_sprite_num == transparency.sprite_num ? VK_TRUE : VK_FALSE;
-
 	const VkAccelerationStructureGeometryKHR* geometries = &geometry;
 
 	const VkAccelerationStructureBuildGeometryInfoKHR info = {
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
 		.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
 		.flags = TR_BLAS_BUILD_FLAGS,
-		.update = update,
+		.update = VK_FALSE,
 		.srcAccelerationStructure = transparency.sprite_blas,
 		.dstAccelerationStructure = transparency.sprite_blas,
 		.geometryArrayOfPointers = VK_TRUE,
@@ -849,8 +835,6 @@ static void update_sprite_blas(VkCommandBuffer command_buffer)
 		.ppGeometries = &geometries,
 		.scratchData = transparency.scratch_buffer_address + transparency.sprite_scratch_device_offset,
 	};
-
-	transparency.blas_sprite_num = transparency.sprite_num;
 
 	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.beam_num * 2 };
 
@@ -944,10 +928,6 @@ static void create_buffers()
 	_VK(vkCreateBuffer(qvk.device, &particle_color_buffer_info, NULL, &transparency.particle_color_buffer));
 	_VK(vkCreateBuffer(qvk.device, &beam_color_buffer_info, NULL, &transparency.beam_color_buffer));
 	_VK(vkCreateBuffer(qvk.device, &sprite_info_buffer_info, NULL, &transparency.sprite_info_buffer));
-
-	transparency.scratch_buffer_address = get_buffer_device_address(transparency.scratch_buffer);
-	transparency.vertex_buffer_address = get_buffer_device_address(transparency.vertex_buffer);
-	transparency.index_buffer_address = get_buffer_device_address(transparency.index_buffer);
 }
 
 static qboolean allocate_and_bind_memory_to_buffers()
@@ -1048,6 +1028,10 @@ static qboolean allocate_and_bind_memory_to_buffers()
 
 	_VK(vkMapMemory(qvk.device, transparency.host_buffer_memory, 0, host_buffer_size, 0,
 		&transparency.mapped_host_buffer));
+	
+	transparency.scratch_buffer_address = get_buffer_device_address(transparency.scratch_buffer);
+	transparency.vertex_buffer_address = get_buffer_device_address(transparency.vertex_buffer);
+	transparency.index_buffer_address = get_buffer_device_address(transparency.index_buffer);
 
 	return qtrue;
 }
