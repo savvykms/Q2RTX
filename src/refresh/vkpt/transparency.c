@@ -748,7 +748,7 @@ static void update_particle_blas(VkCommandBuffer command_buffer)
 		.scratchData = transparency.scratch_buffer_address
 	};
 
-	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.beam_num * 2 };
+	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.particle_num * 2 };
 
 	VkAccelerationStructureBuildOffsetInfoKHR* offsets = &offset;
 
@@ -836,7 +836,7 @@ static void update_sprite_blas(VkCommandBuffer command_buffer)
 		.scratchData = transparency.scratch_buffer_address + transparency.sprite_scratch_device_offset,
 	};
 
-	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.beam_num * 2 };
+	VkAccelerationStructureBuildOffsetInfoKHR offset = { .primitiveCount = transparency.sprite_num * 2 };
 
 	VkAccelerationStructureBuildOffsetInfoKHR* offsets = &offset;
 
