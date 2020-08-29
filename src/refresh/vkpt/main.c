@@ -64,7 +64,8 @@ cvar_t *cvar_drs_adjust_up = NULL;
 cvar_t *cvar_drs_adjust_down = NULL;
 cvar_t *cvar_drs_gain = NULL;
 cvar_t *cvar_show_entlights = NULL;
-cvar_t* cvar_entlights_scale = NULL;
+cvar_t *cvar_entlights_enabled = NULL;
+cvar_t *cvar_entlights_scale = NULL;
 extern cvar_t *scr_viewsize;
 extern cvar_t *cvar_bloom_enable;
 static int drs_current_scale = 0;
@@ -1475,7 +1476,7 @@ bsp_add_entlights( const bsp_t *bsp )
 	entity_scale = atof(cvar_entlights_scale->string);
 	if ( entity_scale == 0.00f )
 	{
-		entity_scale = 1.00f;
+		entity_scale = 0.05f;
 	}
 
 	//initialize all light values, even if not used
@@ -3276,7 +3277,8 @@ R_Init_RTX(qboolean total)
 	scr_viewsize->changed = viewsize_changed;
 
 	cvar_show_entlights = Cvar_Get("cl_show_entlights", "0", 0);
-	cvar_entlights_scale = Cvar_Get("cl_entlights_scale", "0.00", 0);
+	cvar_entlights_scale = Cvar_Get("cl_entlights_scale", "0.05", 0);
+	cvar_entlights_enabled = Cvar_Get("cl_entlights_enabled", "1", 0);
 
 	drs_init();
 
@@ -3615,7 +3617,14 @@ R_BeginRegistration_RTX(const char *name)
 		Com_Error(ERR_DROP, "%s: couldn't load %s: %s", __func__, bsp_path, Q_ErrorString(ret));
 	}
 	bsp_world_model = bsp;
-	bsp_add_entlights(bsp);
+	if (cvar_entlights_enabled->integer != 0)
+	{
+		bsp_add_entlights(bsp);
+	}
+	else
+	{
+		num_entlights = 0;
+	}
 	bsp_mesh_register_textures(bsp);
 	bsp_mesh_create_from_bsp(&vkpt_refdef.bsp_mesh_world, bsp, name);
 	vkpt_light_stats_create(&vkpt_refdef.bsp_mesh_world);
