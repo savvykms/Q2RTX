@@ -443,8 +443,6 @@ static const VkApplicationInfo vk_app_info = {
 /* use this to override file names */
 static const char *shader_module_file_names[NUM_QVK_SHADER_MODULES];
 
-int register_model_dirty;
-
 void
 get_vk_extension_list(
 		const char *layer,
@@ -1344,8 +1342,10 @@ static inline uint32_t fill_model_instance(const entity_t* entity, const model_t
 	if (oldframe >= model->numframes) oldframe = 0;
 
 	memcpy(instance->M, transform, sizeof(float) * 16);
-	instance->offset_curr = mesh->vertex_offset + frame    * mesh->numverts;
-	instance->offset_prev = mesh->vertex_offset + oldframe * mesh->numverts;
+	instance->idx_offset = mesh->idx_offset;
+	instance->model_index = model - r_models;
+	instance->offset_curr = mesh->vertex_offset + frame    * mesh->numverts * (sizeof(model_vertex_t) / sizeof(uint32_t));
+	instance->offset_prev = mesh->vertex_offset + oldframe * mesh->numverts * (sizeof(model_vertex_t) / sizeof(uint32_t));
 	instance->backlerp = entity->backlerp;
 	instance->material = material_id;
 	instance->alpha = (entity->flags & RF_TRANSLUCENT) ? entity->alpha : 1.0f;
@@ -1887,6 +1887,12 @@ static void process_regular_entity(
 		{
 			assert(!"Total entity count overflow");
 			break;
+		}
+
+		if (mesh->idx_offset < 0 || mesh->vertex_offset < 0)
+		{
+			// failed to upload the vertex data - don't instance this mesh
+			continue;
 		}
 
 		uint32_t material_id = fill_model_instance(entity, model, mesh, transform, current_model_instance_index, is_viewer_weapon, is_double_sided);
@@ -2742,7 +2748,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 		world_anim_frame = new_world_anim_frame;
 
 		BEGIN_PERF_MARKER(trace_cmd_buf, PROFILER_INSTANCE_GEOMETRY);
-		vkpt_vertex_buffer_create_instance(trace_cmd_buf, upload_info.num_instances, update_world_animations);
+		vkpt_instance_geometry(trace_cmd_buf, upload_info.num_instances, update_world_animations);
 		END_PERF_MARKER(trace_cmd_buf, PROFILER_INSTANCE_GEOMETRY);
 
 		BEGIN_PERF_MARKER(trace_cmd_buf, PROFILER_ASVGF_GRADIENT_SAMPLES);
@@ -2752,7 +2758,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 		BEGIN_PERF_MARKER(trace_cmd_buf, PROFILER_BVH_UPDATE);
 		assert(upload_info.num_vertices % 3 == 0);
 		build_transparency_blas(trace_cmd_buf);
-		vkpt_pt_create_all_dynamic(trace_cmd_buf, qvk.current_frame_index, qvk.buf_vertex.buffer, &upload_info);
+		vkpt_pt_create_all_dynamic(trace_cmd_buf, qvk.current_frame_index, &upload_info);
 		vkpt_pt_create_toplevel(trace_cmd_buf, qvk.current_frame_index, render_world, upload_info.weapon_left_handed);
 		vkpt_pt_update_descripter_set_bindings(qvk.current_frame_index);
 		END_PERF_MARKER(trace_cmd_buf, PROFILER_BVH_UPDATE);
@@ -3083,12 +3089,7 @@ retry:;
 	vkpt_textures_end_registration();
 	vkpt_textures_update_descriptor_set();
 
-	/* cannot be called in R_EndRegistration as it would miss the initially textures (charset etc) */
-	if(register_model_dirty) {
-		_VK(vkpt_vertex_buffer_upload_models_to_staging());
-		_VK(vkpt_vertex_buffer_upload_staging());
-		register_model_dirty = 0;
-	}
+	vkpt_vertex_buffer_upload_models();
 	vkpt_draw_clear_stretch_pics();
 
 	SCR_SetHudAlpha(1.f);
@@ -3619,7 +3620,7 @@ R_BeginRegistration_RTX(const char *name)
 	bsp_mesh_create_from_bsp(&vkpt_refdef.bsp_mesh_world, bsp, name);
 	vkpt_light_stats_create(&vkpt_refdef.bsp_mesh_world);
 	_VK(vkpt_vertex_buffer_upload_bsp_mesh_to_staging(&vkpt_refdef.bsp_mesh_world));
-	_VK(vkpt_vertex_buffer_upload_staging());
+	_VK(vkpt_vertex_buffer_bsp_upload_staging());
 	vkpt_refdef.bsp_mesh_world_loaded = 1;
 	bsp = NULL;
 	world_anim_frame = 0;
@@ -3638,8 +3639,8 @@ R_BeginRegistration_RTX(const char *name)
 	_VK(vkpt_pt_destroy_static());
 	const bsp_mesh_t *m = &vkpt_refdef.bsp_mesh_world;
 	_VK(vkpt_pt_create_static(
-		qvk.buf_vertex.buffer, 
-		offsetof(VertexBuffer, positions_bsp), 
+		qvk.buf_vertex_bsp.buffer, 
+		offsetof(BspVertexBuffer, positions_bsp), 
 		m->world_idx_count, 
 		m->world_transparent_count,
 		m->world_sky_count,
