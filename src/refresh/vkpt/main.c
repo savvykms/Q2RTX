@@ -64,6 +64,7 @@ cvar_t *cvar_drs_adjust_up = NULL;
 cvar_t *cvar_drs_adjust_down = NULL;
 cvar_t *cvar_drs_gain = NULL;
 cvar_t *cvar_show_entlights = NULL;
+cvar_t* cvar_entlights_scale = NULL;
 extern cvar_t *scr_viewsize;
 extern cvar_t *cvar_bloom_enable;
 static int drs_current_scale = 0;
@@ -1471,14 +1472,18 @@ bsp_add_entlights( const bsp_t *bsp )
 
 	//replicate algorithm from qrad3; would be best to be able to set entity_scale dynamically depending upon map
 	//so that original qrad parameters could be replicated here
-	entity_scale = 1.00f;
+	entity_scale = atof(cvar_entlights_scale->string);
+	if ( entity_scale == 0.00f )
+	{
+		entity_scale = 1.00f;
+	}
 
 	//initialize all light values, even if not used
 	num_entlights = 0;
 	for (el = 0; el < MAX_ENTLIGHTS; el++)
 	{
 		dlight_t* elight;
-		elight = (dlight_t*)(entlights + (el * sizeof(dlight_t)));
+		elight = &entlights[el]; // (dlight_t*)(entlights + (el * sizeof(dlight_t)));
 		elight->origin[0] = 0.00f;
 		elight->origin[1] = 0.00f;
 		elight->origin[2] = 0.00f;
@@ -1486,7 +1491,7 @@ bsp_add_entlights( const bsp_t *bsp )
 		elight->transformed[1] = 0.00f;
 		elight->transformed[2] = 0.00f;
 		elight->intensity = 0.00f;
-		elight->radius =0.00f;
+		elight->radius = 0.00f;
 		elight->color[0] = 0.00f;
 		elight->color[1] = 0.00f;
 		elight->color[2] = 0.00f;
@@ -1526,7 +1531,7 @@ bsp_add_entlights( const bsp_t *bsp )
 		{
 			break;
 		}
-		if ( com_token[0] != '{' )
+ 		if ( com_token[0] != '{' )
 		{
 			Com_LPrintf(PRINT_WARNING, "bsp_add_entlights: found %s when expecting {", com_token);
 		}
@@ -1602,7 +1607,7 @@ bsp_add_entlights( const bsp_t *bsp )
 			//"light" "300" - F_INT
 			//"origin" "-1632 320 256" - F_VECTOR
 
-			elight = (dlight_t*)( entlights + (i * sizeof(dlight_t)));
+			elight = &entlights[num_entlights]; // (dlight_t*)(entlights + (i * sizeof(dlight_t)));
 			elight->intensity = 300.0f; //original qrad3 default
 			elight->radius = elight->intensity * entity_scale;
 			elight->color[0] = 1.00f;
@@ -1614,9 +1619,7 @@ bsp_add_entlights( const bsp_t *bsp )
 				if (!Q_stricmp(keypairs[i].key, "origin") || !Q_stricmp(keypairs[i].key, "_color"))
 				{
 					vec3_t vec;
-					vec3_t* v;
 
-					v = NULL;
 					vec[0] = 0.0f;
 					vec[1] = 0.0f;
 					vec[2] = 0.0f;
@@ -1628,11 +1631,12 @@ bsp_add_entlights( const bsp_t *bsp )
 					}
 					if (!Q_stricmp(keypairs[i].key, "origin"))
 					{
-						v = &elight->origin;
+						VectorCopy(vec, elight->origin);
 					}
 					else if (!Q_stricmp(keypairs[i].key, "_color"))
 					{
-						v = &elight->color;
+						VectorCopy(vec, elight->color);
+						//v = &elight->color;
 					}
 					else
 					{
@@ -1640,9 +1644,9 @@ bsp_add_entlights( const bsp_t *bsp )
 						parse_error = qtrue;
 						break;
 					}
-					*v[0] = vec[0];
-					*v[1] = vec[1];
-					*v[2] = vec[2];
+					//*v[0] = vec[0];
+					//*v[1] = vec[1];
+					//*v[2] = vec[2];
 				}
 				else if (!Q_stricmp(keypairs[i].key, "light") || !Q_stricmp(keypairs[i].key, "_light"))
 				{
@@ -1666,7 +1670,7 @@ bsp_add_entlights( const bsp_t *bsp )
 				}
 			}
 
-			if ( !parse_error )
+			if ( parse_error == qfalse && elight->radius != 0.00f )
 			{
 				//if not correct, redo this light definition with the next we find
 				//e.g. effectively ignore bad lights
@@ -1681,7 +1685,7 @@ add_elights(refdef_t *fd, QVKUniformBuffer_t* ubo)
 {
 	for (int i = 0; i < num_entlights && ubo->num_sphere_lights < MAX_LIGHT_SOURCES; i++)
 	{
-		dlight_t *elight = entlights + (i * sizeof(dlight_t));
+		dlight_t *elight = &entlights[i];
 
 		float* dynlight_data = (float*)(ubo->sphere_light_data + ubo->num_sphere_lights * 2);
 		float* center = dynlight_data;
@@ -1690,7 +1694,7 @@ add_elights(refdef_t *fd, QVKUniformBuffer_t* ubo)
 		dynlight_data[7] = 0.f;
 
 		VectorCopy(elight->origin, center);
-		VectorScale(elight->color, elight->intensity / 25.f, color);
+		VectorScale(elight->color, elight->intensity / 300.0f, color);
 
 		*radius = elight->radius;
 
@@ -1698,7 +1702,7 @@ add_elights(refdef_t *fd, QVKUniformBuffer_t* ubo)
 
 		if (cvar_show_entlights->integer && fd->num_particles < MAX_PARTICLES)
 		{
-			particle_t* part = fd->particles + (fd->num_particles * sizeof(particle_t) );
+			particle_t* part = &fd->particles[fd->num_particles]; //fd->particles + (fd->num_particles * sizeof(particle_t));
 
 			VectorCopy(elight->origin, part->origin);
 			part->radius = elight->radius;
@@ -3271,6 +3275,7 @@ R_Init_RTX(qboolean total)
 	scr_viewsize->changed = viewsize_changed;
 
 	cvar_show_entlights = Cvar_Get("cl_show_entlights", "0", 0);
+	cvar_entlights_scale = Cvar_Get("cl_entlights_scale", "0.00", 0);
 
 	drs_init();
 
