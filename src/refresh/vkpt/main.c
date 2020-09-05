@@ -1324,12 +1324,20 @@ static inline uint32_t fill_model_instance(const entity_t* entity, const model_t
 
 	if (!MAT_IsKind(material_id, MATERIAL_KIND_GLASS))  
 	{
-		if (entity->flags & RF_SHELL_RED)
+		//add in RF_IRVISIBLE support
+		if ((entity->flags & RF_IR_VISIBLE) && (vkpt_refdef.fd->rdflags & RDF_IRGOGGLES))
+		{
 			material_id |= MATERIAL_FLAG_SHELL_RED;
-		if (entity->flags & RF_SHELL_GREEN)
-			material_id |= MATERIAL_FLAG_SHELL_GREEN;
-		if (entity->flags & RF_SHELL_BLUE)
-			material_id |= MATERIAL_FLAG_SHELL_BLUE;
+		}
+		else
+		{
+			if (entity->flags & RF_SHELL_RED)
+				material_id |= MATERIAL_FLAG_SHELL_RED;
+			if (entity->flags & RF_SHELL_GREEN)
+				material_id |= MATERIAL_FLAG_SHELL_GREEN;
+			if (entity->flags & RF_SHELL_BLUE)
+				material_id |= MATERIAL_FLAG_SHELL_BLUE;
+		}
 	}
 
 	ModelInstance* instance = &vkpt_refdef.uniform_instance_buffer.model_instances[model_instance_index];
