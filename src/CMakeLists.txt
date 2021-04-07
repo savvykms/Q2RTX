@@ -1,4 +1,5 @@
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required (VERSION 3.9)
+cmake_policy(SET CMP0069 NEW)
 
 SET(SRC_BASEQ2
 	baseq2/g_ai.c
@@ -336,11 +337,14 @@ set(SRC_RT_SHADERS
 
 include(../cmake/compileShaders.cmake)
 
-# Create Target for Shaders
 foreach(s ${SRC_RT_SHADERS})
-    get_filename_component(shader_name ${s} NAME)
+	get_filename_component(shader_name ${s} NAME)
+	get_filename_component(shader_ext ${s} EXT)
 	compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.nv" DEFINES "-DNV_RAY_TRACING")
 	compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.khr" DEFINES "-DKHR_RAY_TRACING")
+	if (shader_ext STREQUAL ".rgen")
+		compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.rq" DEFINES "-DKHR_RAY_QUERY" STAGE "comp")
+	endif()
 endforeach()
 
 foreach(s ${SRC_SHADERS})
