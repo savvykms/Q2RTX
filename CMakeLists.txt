@@ -1,11 +1,12 @@
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required (VERSION 3.9)
+cmake_policy(SET CMP0069 NEW)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 project(quake2-RTX)
 set(Q2RTX_VERSION_MAJOR 1)
-set(Q2RTX_VERSION_MINOR 4)
-set(Q2RTX_VERSION_POINT 1)
+set(Q2RTX_VERSION_MINOR 5)
+set(Q2RTX_VERSION_POINT 0)
 
 # get short-hash
 execute_process(
@@ -37,7 +38,20 @@ ELSE()
     SET(DEFAULT_BUILD_GLSLANG ON)
 ENDIF()
 OPTION(CONFIG_BUILD_GLSLANG "Build glslangValidator from source instead of using the SDK" ${DEFAULT_BUILD_GLSLANG})
+OPTION(CONFIG_BUILD_IPO "Enable interprocedural optimizations" OFF)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+include(CheckIPOSupported)
+
+IF(CONFIG_BUILD_IPO)
+    check_ipo_supported(RESULT result OUTPUT output)
+    if(result)
+        MESSAGE(STATUS "Enabled interprocedural optimizations")
+    else()
+        MESSAGE(STATUS "Interprocedural optimizations not supported: ${output}")
+        SET(CONFIG_BUILD_IPO OFF)
+    endif()
+ENDIF()
 
 # ---------- Setup output Directories -------------------------
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY
@@ -66,6 +80,8 @@ add_subdirectory(extern)
 link_directories(.)
 
 set(CMAKE_INSTALL_PREFIX ${PROJECT_BINARY_DIR}/install)
+
+SET(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${CONFIG_BUILD_IPO})
 
 add_subdirectory(src)
 
