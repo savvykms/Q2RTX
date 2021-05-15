@@ -159,6 +159,22 @@ static inline void enqueue_stretch_pic(
 	}
 }
 
+void RTX_Blend(vec4_t blend_color)
+{
+	color_t color;
+	
+	color.u8[0] = blend_color[0] * 255;
+	color.u8[1] = blend_color[1] * 255;
+	color.u8[2] = blend_color[2] * 255;
+	color.u8[3] = blend_color[3] * 255;
+	//color.u8[0] = vkpt_refdef.fd->blend[0] * 255;
+	//color.u8[1] = vkpt_refdef.fd->blend[1] * 255;
+	//color.u8[2] = vkpt_refdef.fd->blend[2] * 255;
+	//color.u8[3] = vkpt_refdef.fd->blend[3] * 255;
+
+	enqueue_stretch_pic(vkpt_refdef.fd->x, vkpt_refdef.fd->y, vkpt_refdef.fd->width, vkpt_refdef.fd->height, 0.0f, 0.0f, 1.0f, 1.0f, color.u32, TEXNUM_WHITE);
+}
+
 static void
 create_render_pass()
 {

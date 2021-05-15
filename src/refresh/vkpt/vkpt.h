@@ -762,6 +762,7 @@ static inline void end_perf_marker(VkCommandBuffer command_buffer, int index)
 #define BEGIN_PERF_MARKER(command_buffer, name)  begin_perf_marker(command_buffer, name, #name)
 #define END_PERF_MARKER(command_buffer, name)    end_perf_marker(command_buffer, name)
 
+void RTX_Blend(vec4_t blend_color);
 void R_SetClipRect_RTX(const clipRect_t *clip);
 void R_ClearColor_RTX(void);
 void R_SetAlpha_RTX(float alpha);
