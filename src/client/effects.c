@@ -98,7 +98,7 @@ void CL_SetLightStyle(int index, const char *s)
     }
 
     for (i = 0; i < ls->length; i++) {
-        ls->map[i] = (float)(s[i] - 'a') / (float)('m' - 'a');
+        ls->map[i] = (float)(s[i] - 'a') / (float)('z' - 'a');
     }
 
     if (ls->entry.prev) {

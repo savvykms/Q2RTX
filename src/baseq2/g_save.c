@@ -183,6 +183,7 @@ static const save_field_t entityfields[] = {
     I(light_level),
 
     I(style),
+    L(customLightStyle),
 
     T(item),
 

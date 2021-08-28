@@ -547,6 +547,8 @@ extern  cvar_t  *sv_features;
 
 extern  cvar_t  *sv_flaregun;
 
+extern  cvar_t* cl_monsterfootsteps; // From SacikPL
+
 #define world   (&g_edicts[0])
 
 // item spawnflags
@@ -1090,6 +1092,9 @@ struct edict_s {
     int         light_level;
 
     int         style;          // also used as areaportal number
+
+    // WID: Custom lightstyle.
+    char *customLightStyle;
 
     gitem_t     *item;          // for bonus items
 

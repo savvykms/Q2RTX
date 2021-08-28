@@ -18,6 +18,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "shared/shared.h"
 #include "common/pmove.h"
+// From SacikPL
+#include "client/client.h"
+
+void AL_Underwater();
+void AL_Overwater();
+// End From.
 
 #define STEPSIZE    18
 
@@ -1231,6 +1237,8 @@ void Pmove(pmove_t *pmove, pmoveParams_t *params)
     // set groundentity, watertype, and waterlevel for final spot
     PM_CategorizePosition();
 
+    PM_UpdateUnderwaterSfx(); // From SacikPL
+
     PM_SnapPosition();
 }
 
@@ -1258,3 +1266,31 @@ void PmoveEnableQW(pmoveParams_t *pmp)
     pmp->airaccelerate = qtrue;
 }
 
+// All below from SacikPL
+qboolean snd_is_underwater;
+qboolean snd_is_underwater_enabled;
+
+PM_UpdateUnderwaterSfx(void)
+{
+    static int underwater;
+
+    if ((pm->waterlevel == 3) && !underwater) {
+        underwater = 1;
+        snd_is_underwater = 1;
+
+#ifdef USE_OPENAL
+        if (snd_is_underwater_enabled)
+            AL_Underwater();
+#endif
+    }
+
+    if ((pm->waterlevel < 3) && underwater) {
+        underwater = 0;
+        snd_is_underwater = 0;
+
+#ifdef USE_OPENAL
+        if (snd_is_underwater_enabled)
+            AL_Overwater();
+#endif
+    }
+}

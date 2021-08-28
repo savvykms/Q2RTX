@@ -28,6 +28,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <tinyobj_loader_c.h>
 
 extern cvar_t *cvar_pt_enable_nodraw;
+extern cvar_t *cvar_pt_enable_surface_lights;
+extern cvar_t *cvar_pt_enable_surface_lights_warp;
+extern cvar_t *cvar_pt_bsp_radiance_scale;
 
 static void
 remove_collinear_edges(float* positions, float* tex_coords, int* num_vertices)
@@ -98,7 +101,8 @@ create_poly(
 	uint32_t  material_id,
 	float    *positions_out,
 	float    *tex_coord_out,
-	uint32_t *material_out)
+	uint32_t *material_out,
+	float    *emissive_factors_out)
 {
 	static const int max_vertices = 32;
 	float positions [3 * /*max_vertices*/ 32];
@@ -109,9 +113,11 @@ create_poly(
 	float sc[2] = { 1.f, 1.f };
 	if (texinfo->material)
 	{
-		image_t* image_diffuse = texinfo->material->image_diffuse;
-		sc[0] = 1.0f / image_diffuse->width;
-		sc[1] = 1.0f / image_diffuse->height;
+		image_t* image_diffuse = texinfo->material->image_base;
+		if (image_diffuse && image_diffuse->width && image_diffuse->height) {
+			sc[0] = 1.0f / (float)image_diffuse->width;
+			sc[1] = 1.0f / (float)image_diffuse->height;
+		}
 	}
 
 	float pos_center[3] = { 0 };
@@ -185,13 +191,6 @@ create_poly(
         } \
     } while(0)
 
-#define CP_M(idx) \
-    do { \
-        if(material_out) { \
-            material_out[k] = material_id; \
-        } \
-    } while(0)
-
 	int k = 0;
 	/* switch between triangle fan around center or first vertex */
 	//int tess_center = 0;
@@ -201,6 +200,10 @@ create_poly(
 		? num_vertices
 		: num_vertices - 2;
 
+	const float emissive_factor = (texinfo->c.flags & SURF_LIGHT) && texinfo->material->bsp_radiance
+		? (float)texinfo->radiance * cvar_pt_bsp_radiance_scale->value
+		: 1.f;
+	
 	for (int i = 0; i < num_triangles; i++)
 	{
 		int i1 = (i + 2 - tess_center) % num_vertices;
@@ -208,19 +211,23 @@ create_poly(
 
 		CP_V(k, tess_center ? pos_center : positions);
 		CP_T(k, tess_center ? tc_center : tex_coords);
-		CP_M(k);
 		k++;
 
 		CP_V(k, positions + i1 * 3);
 		CP_T(k, tex_coords + i1 * 2);
-		CP_M(k);
 		k++;
 
 		CP_V(k, positions + i2 * 3);
 		CP_T(k, tex_coords + i2 * 2);
-		CP_M(k);
 		k++;
+		
+		if (material_out) {
+			material_out[i] = material_id;
+		}
 
+		if (emissive_factors_out) {
+			emissive_factors_out[i] = emissive_factor;
+		}
 	}
 
 #undef CP_V
@@ -242,8 +249,21 @@ belongs_to_model(bsp_t *bsp, mface_t *surf)
 	return 0;
 }
 
+static int filter_static_masked(int flags)
+{
+	const pbr_material_t* mat = MAT_ForIndex(flags & MATERIAL_INDEX_MASK);
+
+	if (mat && mat->image_mask)
+		return 1;
+
+	return 0;
+}
+
 static int filter_static_opaque(int flags)
 {
+	if (filter_static_masked(flags))
+		return 0;
+	
 	flags &= MATERIAL_KIND_MASK;
 	if (flags == MATERIAL_KIND_SKY || flags == MATERIAL_KIND_WATER || flags == MATERIAL_KIND_SLIME || flags == MATERIAL_KIND_GLASS || flags == MATERIAL_KIND_TRANSPARENT)
 		return 0;
@@ -279,7 +299,7 @@ static int filter_all(int flags)
 // Computes a point at a small distance above the center of the triangle.
 // Returns qfalse if the triangle is degenerate, qtrue otherwise.
 qboolean
-get_triangle_off_center(const float* positions, float* center, float* anti_center)
+get_triangle_off_center(const float* positions, float* center, float* anti_center, float offset)
 {
 	const float* v0 = positions + 0;
 	const float* v1 = positions + 3;
@@ -300,9 +320,10 @@ get_triangle_off_center(const float* positions, float* center, float* anti_cente
 	CrossProduct(e1, e2, normal);
 	float length = VectorNormalize(normal);
 
-	// Offset the center by one normal to make sure that the point is
+	// Offset the center by a fraction of the normal to make sure that the point is
 	// inside a BSP leaf and not on a boundary plane.
 
+	VectorScale(normal, offset, normal);
 	VectorAdd(center, normal, center);
 
 	if (anti_center)
@@ -330,7 +351,16 @@ get_surf_light_style(const mface_t* surf)
 static qboolean
 get_surf_plane_equation(mface_t* surf, float* plane)
 {
-	for (int i = 0; i < surf->numsurfedges - 2; i++)
+	// Go over multiple planes defined by different edge pairs of the surface.
+	// Some of the edges may be collinear or almost-collinear to each other,
+	// so we can't just take the first pair of edges.
+	// We can't even take the first pair of edges with nonzero cross product
+	// because of numerical issues - they may be almost-collinear.
+	// So this function finds the plane equation from the triangle with the
+	// largest area, i.e. the longest cross product.
+	
+	float maxlen = 0.f;
+	for (int i = 0; i < surf->numsurfedges - 1; i++)
 	{
 		float* v0 = surf->firstsurfedge[i + 0].edge->v[surf->firstsurfedge[i + 0].vert]->point;
 		float* v1 = surf->firstsurfedge[i + 1].edge->v[surf->firstsurfedge[i + 1].vert]->point;
@@ -338,17 +368,17 @@ get_surf_plane_equation(mface_t* surf, float* plane)
 		vec3_t e0, e1;
 		VectorSubtract(v1, v0, e0);
 		VectorSubtract(v2, v1, e1);
-		CrossProduct(e0, e1, plane);
-		float len = VectorLength(plane);
-		if (len > 0)
+		vec3_t normal;
+		CrossProduct(e0, e1, normal);
+		float len = VectorLength(normal);
+		if (len > maxlen)
 		{
-			VectorScale(plane, 1.0f / len, plane);
+			VectorScale(normal, 1.0f / len, plane);
 			plane[3] = -DotProduct(plane, v0);
-			return qtrue;
+			maxlen = len;
 		}
 	}
-
-	return qfalse;
+	return (maxlen > 0.f);
 }
 
 static qboolean
@@ -380,7 +410,7 @@ is_sky_or_lava_cluster(bsp_mesh_t* wm, mface_t* surf, int cluster, int material_
 	return qfalse;
 }
 
-static void merge_pvs_rows(bsp_t* bsp, char* src, char* dst)
+static void merge_pvs_rows(bsp_t* bsp, byte* src, byte* dst)
 {
 	for (int i = 0; i < bsp->visrowsize; i++)
 	{
@@ -389,7 +419,7 @@ static void merge_pvs_rows(bsp_t* bsp, char* src, char* dst)
 }
 
 #define FOREACH_BIT_BEGIN(SET,ROWSIZE,VAR) \
-	for (int _byte_idx = 0; _byte_idx < ROWSIZE; _byte_idx++) { \
+	for (int _byte_idx = 0; _byte_idx < (ROWSIZE); _byte_idx++) { \
 	if (SET[_byte_idx]) { \
 		for (int _bit_idx = 0; _bit_idx < 8; _bit_idx++) { \
 			if (SET[_byte_idx] & (1 << _bit_idx)) { \
@@ -397,7 +427,7 @@ static void merge_pvs_rows(bsp_t* bsp, char* src, char* dst)
 
 #define FOREACH_BIT_END  } } } }
 
-static void connect_pvs(bsp_t* bsp, int cluster_a, char* pvs_a, int cluster_b, char* pvs_b)
+static void connect_pvs(bsp_t* bsp, int cluster_a, byte* pvs_a, int cluster_b, byte* pvs_b)
 {
 	FOREACH_BIT_BEGIN(pvs_a, bsp->visrowsize, vis_cluster_a)
 		if (vis_cluster_a != cluster_a && vis_cluster_a != cluster_b)
@@ -421,12 +451,12 @@ static void make_pvs_symmetric(bsp_t* bsp)
 {
 	for (int cluster = 0; cluster < bsp->vis->numclusters; cluster++)
 	{
-		char* pvs = BSP_GetPvs(bsp, cluster);
+		byte* pvs = BSP_GetPvs(bsp, cluster);
 
 		FOREACH_BIT_BEGIN(pvs, bsp->visrowsize, vis_cluster)
 			if (vis_cluster != cluster)
 			{
-				char* vis_pvs = BSP_GetPvs(bsp, vis_cluster);
+				byte* vis_pvs = BSP_GetPvs(bsp, vis_cluster);
 				Q_SetBit(vis_pvs, cluster);
 			}
 		FOREACH_BIT_END
@@ -441,12 +471,12 @@ static void build_pvs2(bsp_t* bsp)
 
 	for (int cluster = 0; cluster < bsp->vis->numclusters; cluster++)
 	{
-		char* pvs = BSP_GetPvs(bsp, cluster);
-		char* dest_pvs = BSP_GetPvs2(bsp, cluster);
+		byte* pvs = BSP_GetPvs(bsp, cluster);
+		byte* dest_pvs = BSP_GetPvs2(bsp, cluster);
 		memcpy(dest_pvs, pvs, bsp->visrowsize);
 
 		FOREACH_BIT_BEGIN(pvs, bsp->visrowsize, vis_cluster)
-			char* pvs2 = BSP_GetPvs(bsp, vis_cluster);
+			byte* pvs2 = BSP_GetPvs(bsp, vis_cluster);
 			merge_pvs_rows(bsp, pvs2, dest_pvs);
 		FOREACH_BIT_END
 	}
@@ -500,7 +530,7 @@ collect_surfaces(int *idx_ctr, bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int (*
 		if (!filter(material_id))
 			continue;
 
-		if ((material_id & MATERIAL_FLAG_LIGHT) && surf->texinfo->material->enable_light_styles)
+		if ((material_id & MATERIAL_FLAG_LIGHT) && surf->texinfo->material->light_styles)
 		{
 			int light_style = get_surf_light_style(surf);
 			material_id |= (light_style << MATERIAL_LIGHT_STYLE_SHIFT) & MATERIAL_LIGHT_STYLE_MASK;
@@ -513,14 +543,15 @@ collect_surfaces(int *idx_ctr, bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int (*
 			material_id = (material_id & ~MATERIAL_LIGHT_STYLE_MASK) | ((camera_id << MATERIAL_LIGHT_STYLE_SHIFT) & MATERIAL_LIGHT_STYLE_MASK);
 		}
 
-		if (*idx_ctr + create_poly(surf, material_id, NULL, NULL, NULL) >= MAX_VERT_BSP) {
+		if (*idx_ctr + create_poly(surf, material_id, NULL, NULL, NULL, NULL) >= MAX_VERT_BSP) {
 			Com_Error(ERR_FATAL, "error: exceeding max vertex limit\n");
 		}
 
 		int cnt = create_poly(surf, material_id,
 			&wm->positions[*idx_ctr * 3],
 			&wm->tex_coords[*idx_ctr * 2],
-			&wm->materials[*idx_ctr / 3]);
+			&wm->materials[*idx_ctr / 3],
+			&wm->emissive_factors[*idx_ctr / 3]);
 
 		for (int it = *idx_ctr / 3, k = 0; k < cnt; k += 3, ++it) 
 		{
@@ -531,9 +562,17 @@ collect_surfaces(int *idx_ctr, bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int (*
 				// in q2vkpt that was extracting them was incorrect.
 
 				vec3_t center, anti_center;
-				get_triangle_off_center(wm->positions + it * 9, center, anti_center);
+				get_triangle_off_center(wm->positions + it * 9, center, anti_center, 0.01f);
 
 				int cluster = BSP_PointLeaf(bsp->nodes, center)->cluster;
+
+				// If the small offset for the off-center point was too small, and that point
+				// is not inside any cluster, try a larger offset.
+				if (cluster < 0) {
+					get_triangle_off_center(wm->positions + it * 9, center, anti_center, 1.f);
+					cluster = BSP_PointLeaf(bsp->nodes, center)->cluster;
+				}
+				
 				wm->clusters[it] = cluster;
 
 				if (cluster >= 0 && (MAT_IsKind(material_id, MATERIAL_KIND_SKY) || MAT_IsKind(material_id, MATERIAL_KIND_LAVA)))
@@ -552,8 +591,8 @@ collect_surfaces(int *idx_ctr, bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int (*
 
 						if (cluster >= 0 && anti_cluster >= 0 && cluster != anti_cluster)
 						{
-							char* pvs_cluster = BSP_GetPvs(bsp, cluster);
-							char* pvs_anti_cluster = BSP_GetPvs(bsp, anti_cluster);
+							byte* pvs_cluster = BSP_GetPvs(bsp, cluster);
+							byte* pvs_anti_cluster = BSP_GetPvs(bsp, anti_cluster);
 
 							if (!Q_IsBitSet(pvs_cluster, anti_cluster) || !Q_IsBitSet(pvs_anti_cluster, cluster))
 							{
@@ -726,12 +765,266 @@ is_light_material(uint32_t material)
 }
 
 static void
-collect_ligth_polys(bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int* num_lights, int* allocated_lights, light_poly_t** lights)
+collect_one_light_poly_entire_texture(bsp_t *bsp, mface_t *surf, mtexinfo_t *texinfo,
+									  const vec3_t light_color, float emissive_factor, int light_style,
+									  int *num_lights, int *allocated_lights, light_poly_t **lights)
+{
+	float positions[3 * /*max_vertices*/ 32];
+
+	for (int i = 0; i < surf->numsurfedges; i++)
+	{
+		msurfedge_t *src_surfedge = surf->firstsurfedge + i;
+		medge_t     *src_edge = src_surfedge->edge;
+		mvertex_t   *src_vert = src_edge->v[src_surfedge->vert];
+
+		float *p = positions + i * 3;
+
+		VectorCopy(src_vert->point, p);
+	}
+
+	int num_vertices = surf->numsurfedges;
+	remove_collinear_edges(positions, NULL, &num_vertices);
+
+	const int num_triangles = surf->numsurfedges - 2;
+
+	for (int i = 0; i < num_triangles; i++)
+	{
+		const int e = surf->numsurfedges;
+
+		int i1 = (i + 2) % e;
+		int i2 = (i + 1) % e;
+
+		light_poly_t light;
+		VectorCopy(positions, light.positions + 0);
+		VectorCopy(positions + i1 * 3, light.positions + 3);
+		VectorCopy(positions + i2 * 3, light.positions + 6);
+		VectorScale(light_color, emissive_factor, light.color);
+
+		light.material = texinfo->material;
+		light.style = light_style;
+
+		if(!get_triangle_off_center(light.positions, light.off_center, NULL, 1.f))
+			continue;
+
+		light.cluster = BSP_PointLeaf(bsp->nodes, light.off_center)->cluster;
+		light.emissive_factor = emissive_factor;
+
+		if(light.cluster >= 0)
+		{
+			light_poly_t* list_light = append_light_poly(num_lights, allocated_lights, lights);
+			memcpy(list_light, &light, sizeof(light_poly_t));
+		}
+	}
+}
+
+static void
+collect_one_light_poly(bsp_t *bsp, mface_t *surf, mtexinfo_t *texinfo, int model_idx, const vec4_t plane,
+					   const float tex_scale[], const vec2_t min_light_texcoord, const vec2_t max_light_texcoord,
+					   const vec3_t light_color, float emissive_factor, int light_style,
+					   int* num_lights, int* allocated_lights, light_poly_t** lights)
+{
+	// Scale the texture axes according to the original resolution of the game's .wal textures
+	vec4_t tex_axis0, tex_axis1;
+	VectorScale(texinfo->axis[0], tex_scale[0], tex_axis0);
+	VectorScale(texinfo->axis[1], tex_scale[1], tex_axis1);
+	tex_axis0[3] = texinfo->offset[0] * tex_scale[0];
+	tex_axis1[3] = texinfo->offset[1] * tex_scale[1];
+
+	// The texture basis is not normalized, so we need the lengths of the axes to convert
+	// texture coordinates back into world space
+	float tex_axis0_inv_square_length = 1.0f / DotProduct(tex_axis0, tex_axis0);
+	float tex_axis1_inv_square_length = 1.0f / DotProduct(tex_axis1, tex_axis1);
+
+	// Find the normal of the texture plane
+	vec3_t tex_normal;
+	CrossProduct(tex_axis0, tex_axis1, tex_normal);
+	VectorNormalize(tex_normal);
+
+	float surf_normal_dot_tex_normal = DotProduct(tex_normal, plane);
+
+	if (surf_normal_dot_tex_normal == 0.f)
+	{
+		// Surface is perpendicular to texture plane, which means we can't un-project
+		// texture coordinates back onto the surface. This shouldn't happen though,
+		// so it should be safe to skip such lights.
+		return;
+	}
+
+	// Construct the surface polygon in texture space, and find its texture extents
+
+	poly_t tex_poly;
+	tex_poly.len = surf->numsurfedges;
+
+	point2_t tex_min = { FLT_MAX, FLT_MAX };
+	point2_t tex_max = { -FLT_MAX, -FLT_MAX };
+
+	for (int i = 0; i < surf->numsurfedges; i++)
+	{
+		msurfedge_t *src_surfedge = surf->firstsurfedge + i;
+		medge_t     *src_edge = src_surfedge->edge;
+		mvertex_t   *src_vert = src_edge->v[src_surfedge->vert];
+		
+		point2_t t;
+		t.x = DotProduct(src_vert->point, tex_axis0) + tex_axis0[3];
+		t.y = DotProduct(src_vert->point, tex_axis1) + tex_axis1[3];
+
+		tex_poly.v[i] = t;
+
+		tex_min.x = min(tex_min.x, t.x);
+		tex_min.y = min(tex_min.y, t.y);
+		tex_max.x = max(tex_max.x, t.x);
+		tex_max.y = max(tex_max.y, t.y);
+	}
+
+	// Instantiate a square polygon for every repetition of the texture in this surface,
+	// then clip the original surface against that square polygon.
+
+	for (float y_tile = floorf(tex_min.y); y_tile <= ceilf(tex_max.y); y_tile++)
+	{
+		for (float x_tile = floorf(tex_min.x); x_tile <= ceilf(tex_max.x); x_tile++)
+		{
+			float x_min = x_tile + min_light_texcoord[0];
+			float x_max = x_tile + max_light_texcoord[0];
+			float y_min = y_tile + min_light_texcoord[1];
+			float y_max = y_tile + max_light_texcoord[1];
+
+			// The square polygon, for this repetition, according to the extents of emissive pixels
+
+			poly_t clipper;
+			clipper.len = 4;
+			clipper.v[0].x = x_min; clipper.v[0].y = y_min;
+			clipper.v[1].x = x_max; clipper.v[1].y = y_min;
+			clipper.v[2].x = x_max; clipper.v[2].y = y_max;
+			clipper.v[3].x = x_min; clipper.v[3].y = y_max;
+
+			// Clip it
+
+			poly_t instance;
+			clip_polygon(&tex_poly, &clipper, &instance);
+
+			if (instance.len < 3)
+			{
+				// The square polygon was outside of the original surface
+				continue;
+			}
+
+			// Map the clipped polygon back onto the surface plane
+
+			vec3_t instance_positions[MAX_POLY_VERTS];
+			for (int vert = 0; vert < instance.len; vert++)
+			{
+				// Find a world space point on the texture projection plane
+
+				vec3_t p0, p1, point_on_texture_plane;
+				VectorScale(tex_axis0, (instance.v[vert].x - tex_axis0[3]) * tex_axis0_inv_square_length, p0);
+				VectorScale(tex_axis1, (instance.v[vert].y - tex_axis1[3]) * tex_axis1_inv_square_length, p1);
+				VectorAdd(p0, p1, point_on_texture_plane);
+
+				// Shoot a ray from that point in the texture normal direction,
+				// and intersect it with the surface plane.
+
+				// plane: P.N + d = 0
+				// ray: P = At + B
+				// (At + B).N + d = 0
+				// (A.N)t + B.N + d = 0
+				// t = -(B.N + d) / (A.N)
+
+				float bn = DotProduct(point_on_texture_plane, plane);
+
+				float ray_t = -(bn + plane[3]) / surf_normal_dot_tex_normal;
+
+				vec3_t p2;
+				VectorScale(tex_normal, ray_t, p2);
+				VectorAdd(p2, point_on_texture_plane, instance_positions[vert]);
+			}
+
+			// Create triangles for the polygon, using a triangle fan topology
+
+			const int num_triangles = instance.len - 2;
+
+			for (int i = 0; i < num_triangles; i++)
+			{
+				const int e = instance.len;
+
+				int i1 = (i + 2) % e;
+				int i2 = (i + 1) % e;
+
+				light_poly_t* light = append_light_poly(num_lights, allocated_lights, lights);
+				light->material = texinfo->material;
+				light->style = light_style;
+				light->emissive_factor = emissive_factor;
+				VectorCopy(instance_positions[0], light->positions + 0);
+				VectorCopy(instance_positions[i1], light->positions + 3);
+				VectorCopy(instance_positions[i2], light->positions + 6);
+				VectorScale(light_color, emissive_factor, light->color);
+				
+				get_triangle_off_center(light->positions, light->off_center, NULL, 1.f);
+
+				if (model_idx < 0)
+				{
+					// Find the cluster for this triangle
+					light->cluster = BSP_PointLeaf(bsp->nodes, light->off_center)->cluster;
+
+					if (light->cluster < 0)
+					{
+						// Cluster not found - which happens sometimes.
+						// The lighting system can't work with lights that have no cluster, so remove the triangle.
+						(*num_lights)--;
+					}
+				}
+				else
+				{
+					// It's a model: cluster will be determined after model instantiation.
+					light->cluster = -1;
+				}
+			}
+		}
+	}
+
+}
+
+static qboolean
+collect_frames_emissive_info(pbr_material_t* material, qboolean* entire_texture_emissive, vec2_t min_light_texcoord, vec2_t max_light_texcoord, vec3_t light_color)
+{
+	*entire_texture_emissive = qfalse;
+	min_light_texcoord[0] = min_light_texcoord[1] = 1.0f;
+	max_light_texcoord[0] = max_light_texcoord[1] = 0.0f;
+
+	qboolean any_emissive_valid = qfalse;
+	pbr_material_t *current_material = material;
+	do
+	{
+		const image_t *image = current_material->image_emissive;
+		if (!image)
+		{
+			current_material = r_materials + current_material->next_frame;
+			continue;
+		}
+		if(!any_emissive_valid)
+		{
+			// emissive light color of first frame
+			memcpy(light_color, image->light_color, sizeof(vec3_t));
+		}
+		any_emissive_valid = qtrue;
+
+		*entire_texture_emissive |= image->entire_texture_emissive;
+		min_light_texcoord[0] = MIN(min_light_texcoord[0], image->min_light_texcoord[0]);
+		min_light_texcoord[1] = MIN(min_light_texcoord[1], image->min_light_texcoord[1]);
+		max_light_texcoord[0] = MAX(max_light_texcoord[0], image->max_light_texcoord[0]);
+		max_light_texcoord[1] = MAX(max_light_texcoord[1], image->max_light_texcoord[1]);
+		current_material = r_materials + current_material->next_frame;
+	} while (current_material != material);
+
+	return any_emissive_valid;
+}
+
+static void
+collect_light_polys(bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int* num_lights, int* allocated_lights, light_poly_t** lights)
 {
 	mface_t *surfaces = model_idx < 0 ? bsp->faces : bsp->models[model_idx].firstface;
 	int num_faces = model_idx < 0 ? bsp->numfaces : bsp->models[model_idx].numfaces;
 
-	for (int i = 0; i < num_faces; i++) 
+	for (int i = 0; i < num_faces; i++)
 	{
 		mface_t *surf = surfaces + i;
 
@@ -743,13 +1036,28 @@ collect_ligth_polys(bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int* num_lights, 
 		if(!texinfo->material)
 			continue;
 
-		uint32_t material_id = texinfo->material->flags;
-
-		if(!is_light_material(material_id))
+		// Check if any animation frame is a light material
+		qboolean any_light_frame = qfalse;
+		{
+			pbr_material_t *current_material = texinfo->material;
+			do
+			{
+				any_light_frame |= is_light_material(current_material->flags);
+				current_material = r_materials + current_material->next_frame;
+			} while (current_material != texinfo->material);
+		}
+		if(!any_light_frame)
 			continue;
 
-		const image_t *image = texinfo->material->image_emissive;
-		if (!image)
+		uint32_t material_id = texinfo->material->flags;
+
+		// Collect emissive texture info from across frames
+		qboolean entire_texture_emissive;
+		vec2_t min_light_texcoord;
+		vec2_t max_light_texcoord;
+		vec3_t light_color;
+
+		if (!collect_frames_emissive_info(texinfo->material, &entire_texture_emissive, min_light_texcoord, max_light_texcoord, light_color))
 		{
 			// This algorithm relies on information from the emissive texture,
 			// specifically the extents of the emissive pixels in that texture.
@@ -757,61 +1065,16 @@ collect_ligth_polys(bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int* num_lights, 
 			continue;
 		}
 
-		int light_style = (texinfo->material->enable_light_styles) ? get_surf_light_style(surf) : 0;
+		float emissive_factor = (texinfo->c.flags & SURF_LIGHT) && texinfo->material->bsp_radiance
+			? (float)texinfo->radiance * cvar_pt_bsp_radiance_scale->value
+			: 1.f;
 
-		if (image->entire_texture_emissive)
+		int light_style = (texinfo->material->light_styles) ? get_surf_light_style(surf) : 0;
+
+		if (entire_texture_emissive)
 		{
-			// In some cases, the texture is uniform - example is "lsrlt1" used in the "mine" maps.
-			// Such textures are tiled over the models, and the more complex lighting system below 
-			// breaks up the models into many small triangles, although there is no need to do that.
-			// In these cases, we just triangulate the surface polygon.
-
-			float positions[3 * /*max_vertices*/ 32];
-
-			for (int i = 0; i < surf->numsurfedges; i++)
-			{
-				msurfedge_t *src_surfedge = surf->firstsurfedge + i;
-				medge_t     *src_edge = src_surfedge->edge;
-				mvertex_t   *src_vert = src_edge->v[src_surfedge->vert];
-
-				float *p = positions + i * 3;
-
-				VectorCopy(src_vert->point, p);
-			}
-
-			int num_vertices = surf->numsurfedges;
-			remove_collinear_edges(positions, NULL, &num_vertices);
-
-			const int num_triangles = surf->numsurfedges - 2;
-
-			for (int i = 0; i < num_triangles; i++)
-			{
-				const int e = surf->numsurfedges;
-
-				int i1 = (i + 2) % e;
-				int i2 = (i + 1) % e;
-
-				light_poly_t light;
-				VectorCopy(positions, light.positions + 0);
-				VectorCopy(positions + i1 * 3, light.positions + 3);
-				VectorCopy(positions + i2 * 3, light.positions + 6);
-				VectorCopy(image->light_color, light.color);
-
-				light.material = texinfo->material;
-				light.style = light_style;
-
-				if(!get_triangle_off_center(light.positions, light.off_center, NULL))
-					continue;
-
-				light.cluster = BSP_PointLeaf(bsp->nodes, light.off_center)->cluster;
-
-				if(light.cluster >= 0)
-				{
-					light_poly_t* list_light = append_light_poly(&wm->num_light_polys, &wm->allocated_light_polys, &wm->light_polys);
-					memcpy(list_light, &light, sizeof(light_poly_t));
-				}
-			}
-
+			collect_one_light_poly_entire_texture(bsp, surf, texinfo, light_color, emissive_factor, light_style,
+												  num_lights, allocated_lights, lights);
 			continue;
 		}
 
@@ -822,170 +1085,18 @@ collect_ligth_polys(bsp_mesh_t *wm, bsp_t *bsp, int model_idx, int* num_lights, 
 			continue;
 		}
 
-		image_t* image_diffuse = texinfo->material->image_diffuse;
+		image_t* image_diffuse = texinfo->material->image_base;
 		float tex_scale[2] = { 1.0f / image_diffuse->width, 1.0f / image_diffuse->height };
 
-		// Scale the texture axes according to the original resolution of the game's .wal textures
-		vec4_t tex_axis0, tex_axis1;
-		VectorScale(texinfo->axis[0], tex_scale[0], tex_axis0);
-		VectorScale(texinfo->axis[1], tex_scale[1], tex_axis1);
-		tex_axis0[3] = texinfo->offset[0] * tex_scale[0];
-		tex_axis1[3] = texinfo->offset[1] * tex_scale[1];
-
-		// The texture basis is not normalized, so we need the lengths of the axes to convert
-		// texture coordinates back into world space
-		float tex_axis0_inv_square_length = 1.0f / DotProduct(tex_axis0, tex_axis0);
-		float tex_axis1_inv_square_length = 1.0f / DotProduct(tex_axis1, tex_axis1);
-
-		// Find the normal of the texture plane
-		vec3_t tex_normal;
-		CrossProduct(tex_axis0, tex_axis1, tex_normal);
-		VectorNormalize(tex_normal);
-
-		float surf_normal_dot_tex_normal = DotProduct(tex_normal, plane);
-
-		if (surf_normal_dot_tex_normal == 0.f)
-		{
-			// Surface is perpendicular to texture plane, which means we can't un-project
-			// texture coordinates back onto the surface. This shouldn't happen though,
-			// so it should be safe to skip such lights.
-			continue;
-		}
-
-		// Construct the surface polygon in texture space, and find its texture extents
-
-		poly_t tex_poly;
-		tex_poly.len = surf->numsurfedges;
-
-		point2_t tex_min = { FLT_MAX, FLT_MAX };
-		point2_t tex_max = { -FLT_MAX, -FLT_MAX };
-
-		for (int i = 0; i < surf->numsurfedges; i++)
-		{
-			msurfedge_t *src_surfedge = surf->firstsurfedge + i;
-			medge_t     *src_edge = src_surfedge->edge;
-			mvertex_t   *src_vert = src_edge->v[src_surfedge->vert];
-			
-			point2_t t;
-			t.x = DotProduct(src_vert->point, tex_axis0) + tex_axis0[3];
-			t.y = DotProduct(src_vert->point, tex_axis1) + tex_axis1[3];
-
-			tex_poly.v[i] = t;
-
-			tex_min.x = min(tex_min.x, t.x);
-			tex_min.y = min(tex_min.y, t.y);
-			tex_max.x = max(tex_max.x, t.x);
-			tex_max.y = max(tex_max.y, t.y);
-		}
-
-		// Instantiate a square polygon for every repetition of the texture in this surface,
-		// then clip the original surface against that square polygon.
-
-		for (float y_tile = floorf(tex_min.y); y_tile <= ceilf(tex_max.y); y_tile++)
-		{
-			for (float x_tile = floorf(tex_min.x); x_tile <= ceilf(tex_max.x); x_tile++)
-			{
-				float x_min = x_tile + image->min_light_texcoord[0];
-				float x_max = x_tile + image->max_light_texcoord[0];
-				float y_min = y_tile + image->min_light_texcoord[1];
-				float y_max = y_tile + image->max_light_texcoord[1];
-
-				// The square polygon, for this repetition, according to the extents of emissive pixels
-
-				poly_t clipper;
-				clipper.len = 4;
-				clipper.v[0].x = x_min; clipper.v[0].y = y_min;
-				clipper.v[1].x = x_max; clipper.v[1].y = y_min;
-				clipper.v[2].x = x_max; clipper.v[2].y = y_max;
-				clipper.v[3].x = x_min; clipper.v[3].y = y_max;
-
-				// Clip it
-
-				poly_t instance;
-				clip_polygon(&tex_poly, &clipper, &instance);
-
-				if (instance.len < 3)
-				{
-					// The square polygon was outside of the original surface
-					continue;
-				}
-
-				// Map the clipped polygon back onto the surface plane
-
-				vec3_t instance_positions[MAX_POLY_VERTS];
-				for (int vert = 0; vert < instance.len; vert++)
-				{
-					// Find a world space point on the texture projection plane
-
-					vec3_t p0, p1, point_on_texture_plane;
-					VectorScale(tex_axis0, (instance.v[vert].x - tex_axis0[3]) * tex_axis0_inv_square_length, p0);
-					VectorScale(tex_axis1, (instance.v[vert].y - tex_axis1[3]) * tex_axis1_inv_square_length, p1);
-					VectorAdd(p0, p1, point_on_texture_plane);
-
-					// Shoot a ray from that point in the texture normal direction,
-					// and intersect it with the surface plane.
-
-					// plane: P.N + d = 0
-					// ray: P = At + B
-					// (At + B).N + d = 0
-					// (A.N)t + B.N + d = 0
-					// t = -(B.N + d) / (A.N)
-
-					float bn = DotProduct(point_on_texture_plane, plane);
-
-					float ray_t = -(bn + plane[3]) / surf_normal_dot_tex_normal;
-
-					vec3_t p2;
-					VectorScale(tex_normal, ray_t, p2);
-					VectorAdd(p2, point_on_texture_plane, instance_positions[vert]);
-				}
-
-				// Create triangles for the polygon, using a triangle fan topology
-
-				const int num_triangles = instance.len - 2;
-
-				for (int i = 0; i < num_triangles; i++)
-				{
-					const int e = instance.len;
-
-					int i1 = (i + 2) % e;
-					int i2 = (i + 1) % e;
-
-					light_poly_t* light = append_light_poly(num_lights, allocated_lights, lights);
-					light->material = texinfo->material;
-					light->style = light_style;
-					VectorCopy(instance_positions[0], light->positions + 0);
-					VectorCopy(instance_positions[i1], light->positions + 3);
-					VectorCopy(instance_positions[i2], light->positions + 6);
-					VectorCopy(image->light_color, light->color);
-					
-					get_triangle_off_center(light->positions, light->off_center, NULL);
-
-					if (model_idx < 0)
-					{
-						// Find the cluster for this triangle
-						light->cluster = BSP_PointLeaf(bsp->nodes, light->off_center)->cluster;
-
-						if (light->cluster < 0)
-						{
-							// Cluster not found - which happens sometimes.
-							// The lighting system can't work with lights that have no cluster, so remove the triangle.
-							(*num_lights)--;
-						}
-					}
-					else
-					{
-						// It's a model: cluster will be determined after model instantiation.
-						light->cluster = -1;
-					}
-				}
-			}
-		}
+		collect_one_light_poly(bsp, surf, texinfo, model_idx, plane,
+							   tex_scale, min_light_texcoord, max_light_texcoord,
+							   light_color, emissive_factor, light_style,
+							   num_lights, allocated_lights, lights);
 	}
 }
 
 static void
-collect_sky_and_lava_ligth_polys(bsp_mesh_t *wm, bsp_t* bsp)
+collect_sky_and_lava_light_polys(bsp_mesh_t *wm, bsp_t* bsp)
 {
 	for (int i = 0; i < bsp->numfaces; i++)
 	{
@@ -999,6 +1110,8 @@ collect_sky_and_lava_ligth_polys(bsp_mesh_t *wm, bsp_t* bsp)
 
 		qboolean is_sky = !!(flags & SURF_SKY);
 		qboolean is_lava = surf->texinfo->material ? MAT_IsKind(surf->texinfo->material->flags, MATERIAL_KIND_LAVA) : qfalse;
+
+		is_lava &= (surf->texinfo->material->image_emissive != NULL);
 
 		if (!is_sky && !is_lava)
 			continue;
@@ -1044,7 +1157,7 @@ collect_sky_and_lava_ligth_polys(bsp_mesh_t *wm, bsp_t* bsp)
 
 			light.style = 0;
 
-			if (!get_triangle_off_center(light.positions, light.off_center, NULL))
+			if (!get_triangle_off_center(light.positions, light.off_center, NULL, 1.f))
 				continue;
 
 			light.cluster = BSP_PointLeaf(bsp->nodes, light.off_center)->cluster;
@@ -1068,12 +1181,32 @@ is_model_transparent(bsp_mesh_t *wm, bsp_model_t *model)
 	{
 		int prim = model->idx_offset / 3 + i;
 		int material = wm->materials[prim];
-
+		
 		if (!(MAT_IsKind(material, MATERIAL_KIND_SLIME) || MAT_IsKind(material, MATERIAL_KIND_WATER) || MAT_IsKind(material, MATERIAL_KIND_GLASS) || MAT_IsKind(material, MATERIAL_KIND_TRANSPARENT)))
 			return qfalse;
 	}
 
 	return qtrue;
+}
+
+static qboolean
+is_model_masked(bsp_mesh_t *wm, bsp_model_t *model)
+{
+	if (model->idx_count == 0)
+		return qfalse;
+
+	for (int i = 0; i < model->idx_count / 3; i++)
+	{
+		int prim = model->idx_offset / 3 + i;
+		int material = wm->materials[prim];
+
+		const pbr_material_t* mat = MAT_ForIndex(material & MATERIAL_INDEX_MASK);
+		
+		if (mat && mat->image_mask)
+			return qtrue;
+	}
+
+	return qfalse;
 }
 
 // direct port of the encode_normal function from utils.glsl
@@ -1094,8 +1227,8 @@ encode_normal(vec3_t normal)
     pp[0] = pp[0] * 0.5f + 0.5f;
     pp[1] = pp[1] * 0.5f + 0.5f;
 
-    pp[0] = clamp(pp[0], 0.f, 1.f);
-    pp[1] = clamp(pp[1], 0.f, 1.f);
+    clamp(pp[0], 0.f, 1.f);
+    clamp(pp[1], 0.f, 1.f);
 
     uint32_t ux = (uint32_t)(pp[0] * 0xffffu);
     uint32_t uy = (uint32_t)(pp[1] * 0xffffu);
@@ -1192,13 +1325,13 @@ compute_world_tangents(bsp_mesh_t* wm)
 
 		float texel_density = 0.f;
 		int material_idx = wm->materials[idx_tri] & MATERIAL_INDEX_MASK;
-		pbr_material_t* mat = MAT_GetPBRMaterial(material_idx);
-		if (mat && mat->image_diffuse)
+		pbr_material_t* mat = MAT_ForIndex(material_idx);
+		if (mat && mat->image_base)
 		{
-			dt0[0] *= mat->image_diffuse->width;
-			dt0[1] *= mat->image_diffuse->height;
-			dt1[0] *= mat->image_diffuse->width;
-			dt1[1] *= mat->image_diffuse->height;
+			dt0[0] *= mat->image_base->width;
+			dt0[1] *= mat->image_base->height;
+			dt1[0] *= mat->image_base->width;
+			dt1[1] *= mat->image_base->height;
 
 			float WL0 = VectorLength(dP0);
 			float WL1 = VectorLength(dP1);
@@ -1227,7 +1360,7 @@ load_sky_and_lava_clusters(bsp_mesh_t* wm, const char* map_name)
     qboolean found_map = qfalse;
 
     char* filebuf = NULL;
-    FS_LoadFile(filename, &filebuf);
+    FS_LoadFile(filename, (void**)&filebuf);
     
     if (filebuf)
     {
@@ -1237,7 +1370,7 @@ load_sky_and_lava_clusters(bsp_mesh_t* wm, const char* map_name)
     else
     {
         // try to load the global file
-        FS_LoadFile("sky_clusters.txt", &filebuf);
+        FS_LoadFile("sky_clusters.txt", (void**)&filebuf);
         if (!filebuf)
         {
             Com_WPrintf("Couldn't read sky_clusters.txt\n");
@@ -1298,7 +1431,7 @@ load_cameras(bsp_mesh_t* wm, const char* map_name)
 	wm->num_cameras = 0;
 
 	char* filebuf = NULL;
-	FS_LoadFile("cameras.txt", &filebuf);
+	FS_LoadFile("cameras.txt", (void**)&filebuf);
 	if (!filebuf)
 	{
 		Com_WPrintf("Couldn't read cameras.txt\n");
@@ -1365,14 +1498,15 @@ compute_sky_visibility(bsp_mesh_t *wm, bsp_t *bsp)
 		int prim = wm->world_sky_offset / 3 + i;
 
 		int cluster = wm->clusters[prim];
-		clusters_with_sky[cluster >> 3] |= (1 << (cluster & 7));
+		if ((cluster >> 3) < VIS_MAX_BYTES)
+			clusters_with_sky[cluster >> 3] |= (1 << (cluster & 7));
 	}
 
 	for (int cluster = 0; cluster < numclusters; cluster++)
 	{
 		if (clusters_with_sky[cluster >> 3] & (1 << (cluster & 7)))
 		{
-			char* mask = BSP_GetPvs(bsp, cluster);
+			byte* mask = BSP_GetPvs(bsp, cluster);
 
 			for (int i = 0; i < bsp->visrowsize; i++)
 				wm->sky_visibility[i] |= mask[i];
@@ -1480,7 +1614,7 @@ collect_cluster_lights(bsp_mesh_t *wm, bsp_t *bsp)
 		if(light->cluster < 0)
 			continue;
 
-		const byte* pvs = BSP_GetPvs(bsp, light->cluster);
+		const byte* pvs = (const byte*)BSP_GetPvs(bsp, light->cluster);
 
 		FOREACH_BIT_BEGIN(pvs, bsp->visrowsize, other_cluster)
 			aabb_t* cluster_aabb = wm->cluster_aabbs + other_cluster;
@@ -1586,7 +1720,7 @@ bsp_mesh_load_custom_sky(int *idx_ctr, bsp_mesh_t *wm, bsp_t *bsp, const char* m
 		wm->tex_coords[wm_index * 2 + 5] = 0.f;
 
 		vec3_t center;
-		get_triangle_off_center(wm->positions + wm_index * 3, center, NULL);
+		get_triangle_off_center(wm->positions + wm_index * 3, center, NULL, 1.f);
 
 		int cluster = BSP_PointLeaf(bsp->nodes, center)->cluster;
 		wm->clusters[wm_prim] = cluster;
@@ -1646,8 +1780,9 @@ bsp_mesh_create_from_bsp(bsp_mesh_t *wm, bsp_t *bsp, const char* map_name)
     wm->tex_coords = Z_Malloc(MAX_VERT_BSP * 2 * sizeof(*wm->tex_coords));
     wm->materials = Z_Malloc(MAX_VERT_BSP / 3 * sizeof(*wm->materials));
     wm->clusters = Z_Malloc(MAX_VERT_BSP / 3 * sizeof(*wm->clusters));
+	wm->emissive_factors = Z_Malloc(MAX_VERT_BSP / 3 * sizeof(*wm->emissive_factors));
 
-	// clear these here because `bsp_mesh_load_custom_sky` creates lights before `collect_ligth_polys`
+	// clear these here because `bsp_mesh_load_custom_sky` creates lights before `collect_light_polys`
 	wm->num_light_polys = 0;
 	wm->allocated_light_polys = 0;
 	wm->light_polys = NULL;
@@ -1669,6 +1804,10 @@ bsp_mesh_create_from_bsp(bsp_mesh_t *wm, bsp_t *bsp, const char* map_name)
     wm->world_transparent_offset = idx_ctr;
     collect_surfaces(&idx_ctr, wm, bsp, -1, filter_static_transparent);
     wm->world_transparent_count = idx_ctr - wm->world_transparent_offset;
+
+	wm->world_masked_offset = idx_ctr;
+	collect_surfaces(&idx_ctr, wm, bsp, -1, filter_static_masked);
+	wm->world_masked_count = idx_ctr - wm->world_masked_offset;
 
 	wm->world_sky_offset = idx_ctr;
 	collect_surfaces(&idx_ctr, wm, bsp, -1, filter_static_sky);
@@ -1731,8 +1870,8 @@ bsp_mesh_create_from_bsp(bsp_mesh_t *wm, bsp_t *bsp, const char* map_name)
 
 	compute_cluster_aabbs(wm);
 
-	collect_ligth_polys(wm, bsp, -1, &wm->num_light_polys, &wm->allocated_light_polys, &wm->light_polys);
-	collect_sky_and_lava_ligth_polys(wm, bsp);
+	collect_light_polys(wm, bsp, -1, &wm->num_light_polys, &wm->allocated_light_polys, &wm->light_polys);
+	collect_sky_and_lava_light_polys(wm, bsp);
 
 	for (int k = 0; k < bsp->nummodels; k++)
 	{
@@ -1742,9 +1881,10 @@ bsp_mesh_create_from_bsp(bsp_mesh_t *wm, bsp_t *bsp, const char* map_name)
 		model->allocated_light_polys = 0;
 		model->light_polys = NULL;
 		
-		collect_ligth_polys(wm, bsp, k, &model->num_light_polys, &model->allocated_light_polys, &model->light_polys);
+		collect_light_polys(wm, bsp, k, &model->num_light_polys, &model->allocated_light_polys, &model->light_polys);
 
 		model->transparent = is_model_transparent(wm, model);
+		model->masked = is_model_masked(wm, model);
 	}
 
 	collect_cluster_lights(wm, bsp);
@@ -1764,6 +1904,7 @@ bsp_mesh_destroy(bsp_mesh_t *wm)
 	Z_Free(wm->clusters);
 	Z_Free(wm->materials);
 	Z_Free(wm->texel_density);
+	Z_Free(wm->emissive_factors);
 
 	Z_Free(wm->light_polys);
 	Z_Free(wm->cluster_lights);
@@ -1776,6 +1917,8 @@ bsp_mesh_destroy(bsp_mesh_t *wm)
 void
 bsp_mesh_register_textures(bsp_t *bsp)
 {
+	MAT_ChangeMap(bsp->name);
+	
 	for (int i = 0; i < bsp->numtexinfo; i++) {
 		mtexinfo_t *info = bsp->texinfo + i;
 		imageflags_t flags;
@@ -1788,42 +1931,31 @@ bsp_mesh_register_textures(bsp_t *bsp)
 		Q_concat(buffer, sizeof(buffer), "textures/", info->name, ".wal", NULL);
 		FS_NormalizePath(buffer, buffer);
 
-		pbr_material_t * mat = MAT_FindPBRMaterial(buffer);
+		pbr_material_t * mat = MAT_Find(buffer, IT_WALL, flags);
 		if (!mat)
 			Com_EPrintf("error finding material '%s'\n", buffer);
-
-		image_t* image_diffuse = IMG_Find(buffer, IT_WALL, flags | IF_SRGB);
-		image_t* image_normals = NULL;
-		image_t* image_emissive = NULL;
-
-		if (image_diffuse != R_NOTEXTURE)
+		
+		if(cvar_pt_enable_surface_lights->integer)
 		{
-			// attempt loading the second texture
-			Q_concat(buffer, sizeof(buffer), "textures/", info->name, "_n.tga", NULL);
-			FS_NormalizePath(buffer, buffer);
-			image_normals = IMG_Find(buffer, IT_WALL, flags);
-			if (image_normals == R_NOTEXTURE) image_normals = NULL;
-
-            if (image_normals && !image_normals->processing_complete)
-            {
-                vkpt_normalize_normal_map(image_normals);
-            }
-
-			// attempt loading the emissive texture
-			Q_concat(buffer, sizeof(buffer), "textures/", info->name, "_light.tga", NULL);
-			FS_NormalizePath(buffer, buffer);
-			image_emissive = IMG_Find(buffer, IT_WALL, flags | IF_SRGB);
-			if (image_emissive == R_NOTEXTURE) image_emissive = NULL;
-
-			if (image_emissive && !image_emissive->processing_complete && (mat->emissive_scale > 0.f) && ((mat->flags & MATERIAL_FLAG_LIGHT) != 0 || MAT_IsKind(mat->flags, MATERIAL_KIND_LAVA)))
-			{
-				vkpt_extract_emissive_texture_info(image_emissive);
-			}
+			/* Synthesize an emissive material if the BSP surface has the LIGHT flag but the
+			   material has no emissive image.
+			   - Skip SKY and NODRAW surfaces, they'll be handled differently.
+			   - Make WARP surfaces optional, as giving water, slime... an emissive texture clashes visually. */
+			qboolean synth_surface_material = ((info->c.flags & (SURF_LIGHT | SURF_SKY | SURF_NODRAW)) == SURF_LIGHT)
+				&& (info->radiance != 0);
+			
+			qboolean is_warp_surface = (info->c.flags & SURF_WARP) != 0;
+			
+			qboolean material_custom = !mat->source_matfile[0];
+			
+			synth_surface_material &= (cvar_pt_enable_surface_lights->integer >= 2) || material_custom;
+			if (cvar_pt_enable_surface_lights_warp->integer == 0)
+				synth_surface_material &= !is_warp_surface;
+			
+			if (synth_surface_material)
+				MAT_SynthesizeEmissive(mat);
 		}
-
-		// finish registration
-		MAT_RegisterPBRMaterial(mat, image_diffuse, image_normals, image_emissive);
-
+		
 		info->material = mat;
 	}
 
@@ -1841,6 +1973,34 @@ bsp_mesh_register_textures(bsp_t *bsp)
 			material->num_frames = texinfo->numframes;
 			material->next_frame = texinfo->next->material->flags & MATERIAL_INDEX_MASK;
 		}
+	}
+}
+
+static void animate_light_polys(int num_light_polys, light_poly_t *light_polys)
+{
+	for (int i = 0; i < num_light_polys; i++)
+	{
+		pbr_material_t *material = light_polys[i].material;
+		if(!material || (material->num_frames <= 1))
+			continue;
+
+		pbr_material_t *new_material = r_materials + material->next_frame;
+		light_polys[i].material = new_material;
+		float emissive_factor = new_material->emissive_factor * light_polys[i].emissive_factor;
+		if(new_material->image_emissive)
+			VectorScale(new_material->image_emissive->light_color, emissive_factor, light_polys[i].color);
+		else
+			VectorSet(light_polys[i].color, 0, 0, 0);
+	}
+}
+
+void bsp_mesh_animate_light_polys(bsp_mesh_t *wm)
+{
+	animate_light_polys(wm->num_light_polys, wm->light_polys);
+	for (int k = 0; k < wm->num_models; k++)
+	{
+		bsp_model_t* model = wm->models + k;
+		animate_light_polys(model->num_light_polys, model->light_polys);
 	}
 }
 

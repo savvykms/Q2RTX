@@ -31,6 +31,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define ENABLE_SHADOW_CAUSTICS
 #define ENABLE_SUN_SHAPE
 #include "path_tracer_rgen.h"
+#include "path_tracer_transparency.glsl"
 #include "projection.glsl"
 
 layout(constant_id = 0) const uint spec_bounce_index = 0;
@@ -476,14 +477,15 @@ main()
 	reflection_ray.t_max = PRIMARY_RAY_T_MAX;
 
 	if(dot(direction, normal) >= 0)
-		reflection_ray.origin -= view_direction.xyz * 0.001;
+		reflection_ray.origin -= view_direction.xyz * 0.01;
 	else
 		reflection_ray.origin -= normal.xyz * 0.001;
 
-	trace_ray(reflection_ray, backface_culling, reflection_cull_mask);
+	trace_ray(reflection_ray, backface_culling, reflection_cull_mask, false);
 
 	// Add the transparency encountered along the reflection ray
-	transparent = alpha_blend(transparent, unpackHalf4x16(ray_payload_brdf.transparency) * vec4(throughput, 1));
+	vec4 payload_transparency = get_payload_transparency_simple(ray_payload_brdf);
+	transparent = alpha_blend(transparent, payload_transparency * vec4(throughput, 1));
 
 	if(is_sky(ray_payload_brdf))
 	{
@@ -527,6 +529,9 @@ main()
 	vec2 tex_coord    = triangle.tex_coords * bary;
 	vec3 new_geo_normal = normalize(triangle.normals * bary);
 
+	if (dot(new_geo_normal, direction) > 0)
+		new_geo_normal = -new_geo_normal;
+	
 	// Compute the LOD for the texture on the reflected/refracted surface.
 	// We don't have texture gradients here, so just estimate the LOD
 	// based on the ray "cone size" and distance. The "cone size" is computed
@@ -627,6 +632,7 @@ main()
 
 	get_material(
 		triangle, 
+		bary,
 		tex_coord, 
 		vec2(0), 
 		vec2(0), 
@@ -652,7 +658,7 @@ main()
 
 	if(is_water(material_id) || is_slime(material_id))
 	{
-		normal = get_water_normal(material_id, geo_normal, triangle.tangent, position, false);
+		normal = get_water_normal(material_id, geo_normal, triangle.tangents[0], position, false);
 
 		if(abs(geo_normal.z) < 0.1)  // hack to detect actual water vs. vertical force fields
 			material_id = (material_id & ~MATERIAL_KIND_MASK) | MATERIAL_KIND_GLASS;

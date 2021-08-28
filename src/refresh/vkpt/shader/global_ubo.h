@@ -73,7 +73,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	UBO_CVAR_DO(pt_cameras, 1) /* switch for security cameras, 0 or 1 */ \
 	UBO_CVAR_DO(pt_direct_polygon_lights, 1) /* switch for direct lighting from local polygon lights, 0 or 1 */ \
 	UBO_CVAR_DO(pt_direct_roughness_threshold, 0.18) /* roughness value where the path tracer switches direct light specular sampling from NDF based to light based, [0..1] */ \
-	UBO_CVAR_DO(pt_direct_area_threshold, 0.2) /* projected area of triangle light at which direct light sampling for specular is replaced with random sampling, [0..1] */ \
 	UBO_CVAR_DO(pt_direct_sphere_lights, 1) /* switch for direct lighting from local sphere lights, 0 or 1 */ \
 	UBO_CVAR_DO(pt_direct_sun_light, 1) /* switch for direct lighting from the sun, 0 or 1 */ \
 	UBO_CVAR_DO(pt_explosion_brightness, 4.0) /* brightness factor for explosions */ \
@@ -86,11 +85,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	UBO_CVAR_DO(pt_min_log_sky_luminance, -10) /* minimum sky luminance, log2 scale, used for polygon light selection, (-inf..inf) */ \
 	UBO_CVAR_DO(pt_metallic_override, -1) /* overrides metallic parameter of all materials if non-negative, [0..1] */ \
 	UBO_CVAR_DO(pt_ndf_trim, 0.9) /* trim factor for GGX NDF sampling (0..1] */ \
-	UBO_CVAR_DO(pt_num_bounce_rays, 1) /* number of bounce rays, [1..inf) */ \
+	UBO_CVAR_DO(pt_num_bounce_rays, 1) /* number of bounce rays, valid values are 0 (disabled), 0.5 (half-res diffuse), 1 (full-res diffuse + specular), 2 (two bounces) */ \
 	UBO_CVAR_DO(pt_particle_softness, 1.0) /* particle softness */ \
 	UBO_CVAR_DO(pt_reflect_refract, 2) /* number of reflection or refraction bounces: 0, 1 or 2 */ \
 	UBO_CVAR_DO(pt_roughness_override, -1) /* overrides roughness of all materials if non-negative, [0..1] */ \
 	UBO_CVAR_DO(pt_specular_anti_flicker, 2) /* fade factor for rough reflections of surfaces far away, [0..inf) */ \
+	UBO_CVAR_DO(pt_specular_mis, 1) /* enables the use of MIS between specular direct lighting and BRDF specular rays */ \
 	UBO_CVAR_DO(pt_show_sky, 0) /* switch for showing the sky polygons, 0 or 1 */ \
 	UBO_CVAR_DO(pt_sun_bounce_range, 2000) /* range limiter for indirect lighting from the sun, helps reduce noise, (0..inf) */ \
 	UBO_CVAR_DO(pt_sun_specular, 1.0) /* scale for the direct specular reflection of the sun */ \
@@ -104,6 +104,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	UBO_CVAR_DO(tm_exposure_bias, -1.0) /* exposure bias, log-2 scale */ \
 	UBO_CVAR_DO(tm_exposure_speed_down, 1) /* speed of exponential eye adaptation when scene gets darker, 0 means instant */ \
 	UBO_CVAR_DO(tm_exposure_speed_up, 2) /* speed of exponential eye adaptation when scene gets brighter, 0 means instant */ \
+	UBO_CVAR_DO(tm_blend_scale_border, 1) /* scale factor for full screen blend intensity, at screen border */ \
+	UBO_CVAR_DO(tm_blend_scale_center, 0.4) /* scale factor for full screen blend intensity, at screen center */ \
+	UBO_CVAR_DO(tm_blend_scale_fade_exp, 4) /* exponent used to interpolate between "border" and "center" factors */ \
 	UBO_CVAR_DO(tm_high_percentile, 90) /* high percentile for computing histogram average, (0..100] */ \
 	UBO_CVAR_DO(tm_knee_start, 0.6) /* where to switch from a linear to a rational function ramp in the post-tonemapping process, (0..1)  */ \
 	UBO_CVAR_DO(tm_low_percentile, 70) /* low percentile for computing histogram average, [0..100) */ \
@@ -141,16 +144,16 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	GLOBAL_UBO_VAR_LIST_DO(float,           sky_transmittance) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           sky_phase_g) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           sky_amb_phase_g) \
-    GLOBAL_UBO_VAR_LIST_DO(float,           sun_solid_angle) \
-    \
-    GLOBAL_UBO_VAR_LIST_DO(vec3,            physical_sky_ground_radiance) \
+	GLOBAL_UBO_VAR_LIST_DO(float,           sun_solid_angle) \
+	\
+	GLOBAL_UBO_VAR_LIST_DO(vec3,            physical_sky_ground_radiance) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             physical_sky_flags) \
-    \
+	\
 	GLOBAL_UBO_VAR_LIST_DO(float,           sky_scattering) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           temporal_blend_factor) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             planet_albedo_map) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             planet_normal_map) \
-    \
+	\
 	GLOBAL_UBO_VAR_LIST_DO(int,             num_sphere_lights) \
 	GLOBAL_UBO_VAR_LIST_DO(int ,            num_static_lights) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             num_static_primitives) \
@@ -186,9 +189,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	GLOBAL_UBO_VAR_LIST_DO(int,             prev_taa_output_width) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             prev_taa_output_height) \
 	\
-    GLOBAL_UBO_VAR_LIST_DO(vec2,            sub_pixel_jitter) \
-    GLOBAL_UBO_VAR_LIST_DO(float,           prev_adapted_luminance) \
+	GLOBAL_UBO_VAR_LIST_DO(vec2,            sub_pixel_jitter) \
+	GLOBAL_UBO_VAR_LIST_DO(float,           prev_adapted_luminance) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           padding1) \
+	GLOBAL_UBO_VAR_LIST_DO(vec4,            fs_blend_color) \
 	\
 	GLOBAL_UBO_VAR_LIST_DO(vec4,            world_center) \
 	GLOBAL_UBO_VAR_LIST_DO(vec4,            world_size) \
@@ -242,17 +246,17 @@ typedef int ivec4_t[4];
 typedef uint32_t uint;
 
 typedef struct {
-	float M[16]; // 16
+	float M[16]; // mat4
 
 	uint32_t material;
 	int offset_curr;
-	int offset_prev;
+	int offset_prev; // matrix offset for IQM
 	float backlerp;
 
 	float alpha;
 	int idx_offset;
 	int model_index;
-	int pad;
+	int is_iqm;
 } ModelInstance;
 
 typedef struct {
@@ -281,13 +285,13 @@ struct ModelInstance {
 
 	uint material;
 	int offset_curr;
-	int offset_prev;
+	int offset_prev; // matrix offset for IQM
 	float backlerp;
 
 	float alpha;
 	int idx_offset;
 	int model_index;
-	int pad;
+	int is_iqm;
 };
 
 struct BspMeshInstance {

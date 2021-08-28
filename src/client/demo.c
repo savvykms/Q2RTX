@@ -21,12 +21,22 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 //
 
 #include "client.h"
+#include "ui/ui.h" // WatIsDeze: Added for menu demo UI_PopMenu functionality.
 
 static byte     demo_buffer[MAX_PACKETLEN];
 
 static cvar_t   *cl_demosnaps;
 static cvar_t   *cl_demomsglen;
 static cvar_t   *cl_demowait;
+
+// WatIsDeze: Menu Demo related vars.
+cvar_t* cl_menudemo;                // Cvar dictates whether to run menu demos at all, or not. 
+cvar_t* cl_menudemo_list;           // Cvar containing the list of menu demo filenames to play through.
+qboolean md_is_playing = qfalse;    // Maintains state of whether a menu demo is playing, or not.
+char md_list[MAX_QPATH][MAX_QPATH]; // The actual stored list after parsing the cvar changes.
+uint32_t md_total = 0;              // The total number of menu demos in the list.
+uint32_t md_current_demo_index = 0; // Current menu demo index that is being played through.
+// WatIsDeze: End menu demo related vars.
 
 // =========================================================================
 
@@ -625,7 +635,28 @@ static void finish_demo(int ret)
 
     if (!s[0]) {
         if (ret == 0) {
-            Com_Error(ERR_DISCONNECT, "Demo finished");
+            if (md_is_playing && cl_menudemo_list->string)
+            {
+                // Increment demo index.
+                if (md_current_demo_index == md_total - 1)
+                    md_current_demo_index = 0;
+                else
+                    md_current_demo_index++;
+
+                char* demoName = md_list[md_current_demo_index];
+
+                // Generate string buffer... sigh.
+                char buffer[MAX_QPATH + 1];
+                memset(buffer, 0, MAX_QPATH);
+                sprintf(buffer, "menudemo %s\n", demoName);
+
+                // Execute buffer, hurray.
+                Cbuf_AddText(&cmd_buffer, buffer);
+                Cbuf_Execute(&cmd_buffer);
+                return;
+            } else {
+                Com_Error(ERR_DISCONNECT, "Demo finished");
+            }
         } else {
             Com_Error(ERR_DROP, "Couldn't read demo: %s", Q_ErrorString(ret));
         }
@@ -685,12 +716,12 @@ static int parse_next_message(int wait)
     return 0;
 }
 
-/*
-====================
-CL_PlayDemo_f
-====================
-*/
-static void CL_PlayDemo_f(void)
+// WatIsDeze: Menu Demo functionality. Best figured to just resort to its own cmd.
+//
+// The solution was to move CL_playDemo into its own function. Allowing a state to
+// be sent to it. CL_PlayDemo_f and CL_PlayMenuDemo_f wrap this up nicely for the 
+// console command line.
+static void CL_PlayDemo(qboolean menuDemo)
 {
     char name[MAX_OSPATH];
     qhandle_t f;
@@ -745,14 +776,62 @@ static void CL_PlayDemo_f(void)
         Cbuf_Execute(&cl_cmdbuf);
         parse_next_message(0);
     }
+
+    // Store state of whether we are playing a menu demo or not.
+    md_is_playing = menuDemo;
 }
 
-static void CL_Demo_c(genctx_t *ctx, int argnum)
+// WatIsDeze: Wrappers.
+static void CL_PlayDemo_f(void) {
+    CL_PlayDemo(qfalse);
+}
+
+static void CL_PlayMenuDemo_f(void) {
+    // WatIsDeze: In case of a menu demo, we want to actually compare the filename to those in the list.
+    // This way, the index can be set, and the list can continue playing from that same file :)
+    //
+    // In case the file isn't around in the list, well, that means we're going to error out.
+
+    // Check whether the file name exists in the list.
+    int32_t demoIndex = -1;
+    const char* demoFile = Cmd_Argv(1);
+
+    for (int i = 0; i < MAX_QPATH; i++) {
+        if (!strcmp(md_list[i], demoFile)) {
+            demoIndex = i;
+        }
+    }
+
+    if (demoIndex == -1) {
+        Com_Error(ERR_DROP, "Couldn't find demo file '%s' in the 'cl_menudemo_list' cvar", demoFile);
+    }
+
+    md_current_demo_index = demoIndex;
+
+    // Just start the demo like any regular one.
+    CL_PlayDemo(qtrue);
+
+    // Pop up the menu.
+    UI_OpenMenu(UIMENU_GAME);
+}
+
+static void CL_Demo_c(genctx_t* ctx, int argnum)
 {
     if (argnum == 1) {
         FS_File_g("demos", "*.dm2;*.dm2.gz;*.mvd2;*.mvd2.gz", FS_SEARCH_SAVEPATH | FS_SEARCH_BYFILTER, ctx);
     }
 }
+
+static void CL_MenuDemo_c(genctx_t* ctx, int argnum) {
+    if (argnum == 1) {
+        FS_File_g("demos", "*.dm2;*.dm2.gz;*.mvd2;*.mvd2.gz", FS_SEARCH_SAVEPATH | FS_SEARCH_BYFILTER, ctx);
+    }
+}
+
+qboolean CL_IsMenuDemoPlaying(void) {
+    return md_is_playing && cls.demo.playback;
+}
+// WatIsDeze: End Menu Demo :)
 
 typedef struct {
     list_t entry;
@@ -1257,6 +1336,7 @@ void CL_DemoFrame(int msec)
 
 static const cmdreg_t c_demo[] = {
     { "demo", CL_PlayDemo_f, CL_Demo_c },
+    { "menudemo", CL_PlayMenuDemo_f, CL_Demo_c },
     { "record", CL_Record_f, CL_Demo_c },
     { "stop", CL_Stop_f },
     { "suspend", CL_Suspend_f },
@@ -1264,6 +1344,54 @@ static const cmdreg_t c_demo[] = {
 
     { NULL }
 };
+
+
+/*
+====================
+WatIsDeze:
+Callback for cl_menudemo_list changes. If it changes, we'll reorganize our demo list.
+Sadly, C has no resizable arrays etc, and to make this list then be ever expandable is a bit of a... ****
+
+So for now, I'll stick to this. 
+====================
+*/
+static void cl_menudemo_list_changed(cvar_t* self)
+{
+    char cvarString[MAX_QPATH];
+
+    // We want to actually have a string value, so we can tokenize it.
+    if (!self->string)
+        return;
+
+    // Clear our previous demo list, if it had any.
+    for (int i = 0; i < MAX_QPATH; i++) {
+        memset(md_list[i], 0, MAX_QPATH);
+    }
+
+    // Copy in the string value.
+    strncpy(cvarString, self->string, MAX_QPATH);
+
+    // Extract the first token
+    char* tokenString = strtok(cvarString, " ");
+
+    // loop through the string to extract all other tokens
+    uint32_t demoIndex = 0;
+
+    // Let's go to tokenizyo... lame joke I know right?
+    while (tokenString != NULL) {
+        // Now we will increment demo index, and copy in the tokenized demo.
+        strncpy(md_list[demoIndex], tokenString, MAX_QPATH);
+
+        // Fetch next tokenString.
+        tokenString = strtok(NULL, " ");
+
+        // Increment demo index.
+        demoIndex++;
+    }
+
+    // Last but not least, we want to assign the demoIndex sum up to be our total demos
+    md_total = demoIndex;
+}
 
 /*
 ====================
@@ -1275,6 +1403,10 @@ void CL_InitDemos(void)
     cl_demosnaps = Cvar_Get("cl_demosnaps", "10", 0);
     cl_demomsglen = Cvar_Get("cl_demomsglen", va("%d", MAX_PACKETLEN_WRITABLE_DEFAULT), 0);
     cl_demowait = Cvar_Get("cl_demowait", "0", 0);
+
+    // WID: Menu demo list. Separated by spaces ofc.
+    cl_menudemo_list = Cvar_Get("cl_menudemo_list", "", 0);
+    cl_menudemo_list->changed = cl_menudemo_list_changed;
 
     Cmd_Register(c_demo);
     List_Init(&cls.demo.snapshots);

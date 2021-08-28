@@ -26,12 +26,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // common.h -- definitions common between client and server, but not game.dll
 //
 
-#define PRODUCT         "Quake II RTX"
+#define PRODUCT         "LKQ2RTX"
 
 #if USE_CLIENT
-#define APPLICATION     "q2rtx"
+#define APPLICATION     "lkq2rtx"
 #else
-#define APPLICATION     "q2rtxded"
+#define APPLICATION     "lkq2rtxded"
 #endif
 
 #define COM_DEFAULT_CFG     "default.cfg"

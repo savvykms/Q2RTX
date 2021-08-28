@@ -8,6 +8,8 @@ set(SHADER_SOURCE_DEPENDENCIES
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/light_lists.h
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/path_tracer_rgen.h
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/path_tracer.h
+    ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/path_tracer_hit_shaders.h
+    ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/path_tracer_transparency.glsl
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/precomputed_sky.glsl
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/precomputed_sky_params.h
     ${CMAKE_SOURCE_DIR}/src/refresh/vkpt/shader/projection.glsl
@@ -35,7 +37,7 @@ endif()
 
 function(compile_shader)
     set(options "")
-    set(oneValueArgs SOURCE_FILE OUTPUT_FILE_NAME OUTPUT_FILE_LIST)
+    set(oneValueArgs SOURCE_FILE OUTPUT_FILE_NAME OUTPUT_FILE_LIST STAGE)
     set(multiValueArgs DEFINES)
     cmake_parse_arguments(params "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -54,6 +56,12 @@ function(compile_shader)
     else()
         get_filename_component(output_file_name ${src_file} NAME)
     endif()
+
+    if (params_STAGE)
+        set(stage -S comp)
+    else()
+        set(stage)
+    endif()
     
     set_source_files_properties(${src_file} PROPERTIES VS_TOOL_OVERRIDE "None")
 
@@ -61,6 +69,7 @@ function(compile_shader)
     set (out_file "${out_dir}/${output_file_name}.spv")
     
     set(glslang_command_line
+            ${stage}
             --target-env vulkan1.2
             -DVKPT_SHADER
             -V

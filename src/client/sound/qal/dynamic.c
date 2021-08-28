@@ -88,6 +88,12 @@ void QAL_Shutdown(void)
     if (al_device)
         al_device->flags &= ~CVAR_SOUND;
 }
+// From SacikPL
+void QALC_PrintExtensions(void)
+{
+    Com_Printf("ALC_EXTENSIONS: %s\n", qalcGetString(device, ALC_EXTENSIONS));
+}
+// End From.
 
 qboolean QAL_Init(void)
 {
@@ -126,6 +132,76 @@ qboolean QAL_Init(void)
 
     al_driver->flags |= CVAR_SOUND;
     al_device->flags |= CVAR_SOUND;
+    if (qalcIsExtensionPresent(device, "ALC_EXT_EFX") && strstr(qalGetString(AL_RENDERER), "OpenAL Soft")) {
+        qalGenFilters = qalcGetProcAddress(device, "alGenFilters");
+        qalFilteri = qalcGetProcAddress(device, "alFilteri");
+        qalFilterf = qalcGetProcAddress(device, "alFilterf");
+        qalDeleteFilters = qalcGetProcAddress(device, "alDeleteFilters");
+        qalEffectf = qalcGetProcAddress(device, "alEffectf");
+        qalEffectfv = qalcGetProcAddress(device, "alEffectfv");
+        qalEffecti = qalcGetProcAddress(device, "alEffecti");
+        qalEffectiv = qalcGetProcAddress(device, "alEffectiv");
+        qalGenEffects = qalcGetProcAddress(device, "alGenEffects");
+        qalAuxiliaryEffectSloti = qalcGetProcAddress(device, "alAuxiliaryEffectSloti");
+        qalGenAuxiliaryEffectSlots = qalcGetProcAddress(device, "alGenAuxiliaryEffectSlots");
+        qalDeleteAuxiliaryEffectSlots = qalcGetProcAddress(device, "alDeleteAuxiliaryEffectSlots");
+        qalDeleteEffects = qalcGetProcAddress(device, "alDeleteEffects");
+        Com_Printf("OpenAL EFX extensions available.\n");
+    }
+    else {
+        qalGenFilters = NULL;
+        qalFilteri = NULL;
+        qalFilterf = NULL;
+        qalDeleteFilters = NULL;
+        qalEffectf = NULL;
+        qalEffectfv = NULL;
+        qalEffecti = NULL;
+        qalEffectiv = NULL;
+        qalGenEffects = NULL;
+        qalAuxiliaryEffectSloti = NULL;
+        qalGenAuxiliaryEffectSlots = NULL;
+        Com_Printf("OpenAL EFX extensions NOT available.\n");
+    }
+
+    if (qalcIsExtensionPresent(device, "ALC_SOFT_HRTF"))
+    {
+        ALCint* enabled;
+        ALCint* status;
+        qalcGetIntegerv(device, ALC_HRTF_SOFT, 1, &enabled);
+        qalcGetIntegerv(device, ALC_HRTF_STATUS_SOFT, 1, &status);
+
+        if ((int)enabled == 1)
+            Com_Printf("HRTF enabled: true\n");
+        else
+            Com_Printf("HRTF enabled: false\n");
+
+        if ((int)status == 0)
+        {
+            Com_Printf("HRTF Status: Disabled\n");
+        }
+        else if ((int)status == 1)
+        {
+            Com_Printf("HRTF Status: Enabled\n");
+        }
+        else if ((int)status == 2)
+        {
+            Com_Printf("HRTF Status: Denied\n");
+        }
+        else if ((int)status == 3)
+        {
+            Com_Printf("HRTF Status: Required\n");
+        }
+        else if ((int)status == 4)
+        {
+            Com_Printf("HRTF Status: Headphones\n");
+        }
+        else if ((int)status == 5)
+        {
+            Com_Printf("HRTF Status: Unsupported\n");
+        }
+
+        Com_Printf("HRTF preset: %s\n", qalcGetString(device, ALC_HRTF_SPECIFIER_SOFT));
+    }
 
     return qtrue;
 

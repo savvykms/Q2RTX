@@ -1,3 +1,5 @@
+#include <AL/efx.h>
+
 #ifndef AL_AL_H
 #define AL_AL_H
 
@@ -448,6 +450,10 @@ AL_API void AL_APIENTRY alDistanceModel(ALenum distanceModel);
 #define AL_LINEAR_DISTANCE_CLAMPED               0xD004
 #define AL_EXPONENT_DISTANCE                     0xD005
 #define AL_EXPONENT_DISTANCE_CLAMPED             0xD006
+
+/** OpenAL Soft*/
+#define AL_SOURCE_SPATIALIZE_SOFT                0x1214
+#define AL_AUTO_SOFT                             0x0002
 
 /** Renderer State management. */
 AL_API void AL_APIENTRY alEnable(ALenum capability);
