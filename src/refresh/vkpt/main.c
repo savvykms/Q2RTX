@@ -84,6 +84,7 @@ cvar_t *cvar_vk_validation = NULL;
 cvar_t* cvar_entlights_show = NULL;
 cvar_t* cvar_entlights_enabled = NULL;
 cvar_t* cvar_entlights_scale = NULL;
+cvar_t* cvar_rtx_polyblend = NULL;
 
 static dlight_t entlights[MAX_ENTLIGHTS];
 static int num_entlights = 0;
@@ -270,7 +271,7 @@ vkpt_initialize_all(VkptInitFlags_t init_flags)
 		VkptInit_t *init = vkpt_initialization + i;
 		if((init->flags & init_flags) != init_flags)
 			continue;
-		
+
 		// some entries will respond to multiple events --- do not initialize twice
 		if (init->is_initialized)
 			continue;
@@ -306,7 +307,7 @@ vkpt_destroy_all(VkptInitFlags_t destroy_flags)
 		VkptInit_t *init = vkpt_initialization + i;
 		if((init->flags & destroy_flags) != destroy_flags)
 			continue;
-		
+
 		// some entries will respond to multiple events --- do not destroy twice
 		if (!init->is_initialized)
 			continue;
@@ -535,7 +536,7 @@ create_swapchain()
 
 	Com_Printf("available surface formats:\n");
 	for(int i = 0; i < num_formats; i++)
-		Com_Printf("  %s\n", vk_format_to_string(avail_surface_formats[i].format)); */ 
+		Com_Printf("  %s\n", vk_format_to_string(avail_surface_formats[i].format)); */
 
 
 	VkFormat acceptable_formats[] = {
@@ -597,7 +598,7 @@ out:;
 		.imageFormat           = qvk.surf_format.format,
 		.imageColorSpace       = qvk.surf_format.colorSpace,
 		.imageExtent           = qvk.extent_unscaled,
-		.imageArrayLayers      = 1, /* only needs to be changed for stereoscopic rendering */ 
+		.imageArrayLayers      = 1, /* only needs to be changed for stereoscopic rendering */
 		.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
 							   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 							   | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -709,7 +710,7 @@ create_command_pool_and_fences()
 			semaphore_group_t* group = &qvk.semaphores[frame][gpu];
 
 			VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-		
+
 			_VK(vkCreateSemaphore(qvk.device, &semaphore_info, NULL, &group->image_available));
 			_VK(vkCreateSemaphore(qvk.device, &semaphore_info, NULL, &group->render_finished));
 			_VK(vkCreateSemaphore(qvk.device, &semaphore_info, NULL, &group->transfer_finished));
@@ -759,7 +760,7 @@ init_vulkan()
 	for(int i = 0; i < qvk.num_layers; i++) {
 		Com_Printf("  %s\n", qvk.layers[i].layerName);
 	}
-	
+
 	/* instance extensions */
 
 	if (!SDL_Vulkan_GetInstanceExtensions(qvk.window, &qvk.num_sdl2_extensions, NULL)) {
@@ -920,7 +921,7 @@ init_vulkan()
 	VkDriverId picked_driver_ray_query = VK_DRIVER_ID_MAX_ENUM;
 	qvk.use_ray_query = qfalse;
 
-	for(int i = 0; i < num_devices; i++) 
+	for(int i = 0; i < num_devices; i++)
 	{
 		VkPhysicalDeviceDriverProperties driver_properties = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
@@ -945,7 +946,7 @@ init_vulkan()
 		vkEnumerateDeviceExtensionProperties(devices[i], NULL, &num_ext, ext_properties);
 
 		Com_Printf("Supported Vulkan device extensions:\n");
-		for(int j = 0; j < num_ext; j++) 
+		for(int j = 0; j < num_ext; j++)
 		{
 			Com_Printf("  %s\n", ext_properties[j].extensionName);
 
@@ -1112,7 +1113,7 @@ init_vulkan()
 		Com_Error(ERR_FATAL, "Could not find a suitable Vulkan queue family!\n");
 		return qfalse;
 	}
-	
+
 	float queue_priorities = 1.0f;
 	int num_create_queues = 0;
 	VkDeviceQueueCreateInfo queue_create_info[3];
@@ -1253,7 +1254,7 @@ init_vulkan()
 	const char** device_extensions = alloca(sizeof(char*) * max_extension_count);
 	uint32_t device_extension_count = 0;
 
-	append_string_list(device_extensions, &device_extension_count, max_extension_count, 
+	append_string_list(device_extensions, &device_extension_count, max_extension_count,
 		vk_requested_device_extensions_common, LENGTH(vk_requested_device_extensions_common));
 
 	if (qvk.use_ray_query)
@@ -1541,7 +1542,7 @@ static inline uint32_t fill_model_instance(const entity_t* entity, const model_t
 	if (is_double_sided)
 		material_id |= MATERIAL_FLAG_DOUBLE_SIDED;
 
-	if (!MAT_IsKind(material_id, MATERIAL_KIND_GLASS))  
+	if (!MAT_IsKind(material_id, MATERIAL_KIND_GLASS))
 	{
 		if (entity->flags & RF_SHELL_RED)
 		{
@@ -1555,8 +1556,24 @@ static inline uint32_t fill_model_instance(const entity_t* entity, const model_t
 
 		if (entity->flags & RF_SHELL_GREEN)
 			material_id |= MATERIAL_FLAG_SHELL_GREEN;
-		if (entity->flags & RF_SHELL_BLUE)
-			material_id |= MATERIAL_FLAG_SHELL_BLUE;
+		}
+		else
+		{
+			if ((entity->flags & RF_IR_VISIBLE) && (vkpt_refdef.fd->rdflags & RDF_IRGOGGLES))
+			{
+				//add in RF_IR_VISIBLE support to support official expansions and certain mods, such as "gloom"
+				material_id |= MATERIAL_FLAG_SHELL_RED;
+			}
+			else
+			{
+				if (entity->flags & RF_SHELL_RED)
+					material_id |= MATERIAL_FLAG_SHELL_RED;
+				if (entity->flags & RF_SHELL_GREEN)
+					material_id |= MATERIAL_FLAG_SHELL_GREEN;
+				if (entity->flags & RF_SHELL_BLUE)
+					material_id |= MATERIAL_FLAG_SHELL_BLUE;
+			}
+		}
 	}
 
 	ModelInstance* instance = &vkpt_refdef.uniform_instance_buffer.model_instances[model_instance_index];
@@ -2035,7 +2052,7 @@ static void process_bsp_entity(const entity_t* entity, int* bsp_mesh_idx, int* i
 
 	if (cluster < 0)
 	{
-		// In some cases, a model slides into a wall, like a push button, so that its center 
+		// In some cases, a model slides into a wall, like a push button, so that its center
 		// is no longer in any BSP node. We still need to assign a cluster to the model,
 		// so try the corners of the model instead, see if any of them has a valid cluster.
 
@@ -2059,12 +2076,12 @@ static void process_bsp_entity(const entity_t* entity, int* bsp_mesh_idx, int* i
 	ubo_bsp_cluster_id[current_bsp_mesh_index] = cluster;
 
 	ubo_bsp_prim_offset[current_bsp_mesh_index] = model->idx_offset / 3;
-	
+
 	const int mesh_vertex_num = model->idx_count;
 
 	ubo_instance_buf_offset[current_bsp_mesh_index] = *num_instanced_vert / 3;
 	ubo_instance_buf_size[current_bsp_mesh_index] = mesh_vertex_num / 3;
-	
+
 	((int*)uniform_instance_buffer->model_indices)[*instance_idx] = ~current_bsp_mesh_index;
 
 	*num_instanced_vert += mesh_vertex_num;
@@ -2117,7 +2134,7 @@ static void process_regular_entity(
 
 	float transform[16];
 	create_entity_matrix(transform, (entity_t*)entity, is_viewer_weapon);
-	
+
 	int current_model_instance_index = *model_instance_idx;
 	int current_instance_index = *instance_idx;
 	int current_num_instanced_vert = *num_instanced_vert;
@@ -2199,7 +2216,7 @@ static void process_regular_entity(
 		model_entity_ids[entity_frame_num][current_model_instance_index] = *(uint32_t*)&hash;
 
 		uint32_t cluster_id = ~0u;
-		if(bsp_world_model) 
+		if(bsp_world_model)
 			cluster_id = BSP_PointLeaf(bsp_world_model->nodes, ((entity_t*)entity)->origin)->cluster;
 		ubo_model_cluster_id[current_model_instance_index] = cluster_id;
 
@@ -2482,7 +2499,7 @@ prepare_entities(EntityUploadInfo* upload_info)
 }
 
 #ifdef VKPT_IMAGE_DUMPS
-static void 
+static void
 copy_to_dump_texture(VkCommandBuffer cmd_buf, int src_image_index)
 {
 	VkImage src_image = qvk.images[src_image_index];
@@ -2618,7 +2635,7 @@ process_render_feedback(ref_feedback_t *feedback, mleaf_t* viewleaf, qboolean* s
 	}
 }
 
-typedef struct reference_mode_s 
+typedef struct reference_mode_s
 {
 	qboolean enable_accumulation;
 	qboolean enable_denoiser;
@@ -2838,7 +2855,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	{
 		ubo->cylindrical_hfov = 0.f;
 	}
-	
+
 	ubo->current_frame_idx = qvk.frame_counter;
 	ubo->width = qvk.extent_render.width;
 	ubo->height = qvk.extent_render.height;
@@ -2886,7 +2903,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 		// looks too dark with it missing
 		ubo->pt_fake_roughness_threshold = 1.f;
 
-		// swap the checkerboard fields every frame in reference or noisy mode to accumulate 
+		// swap the checkerboard fields every frame in reference or noisy mode to accumulate
 		// both reflection and refraction in every pixel
 		ubo->pt_swap_checkerboard = (qvk.frame_counter & 1);
 
@@ -2979,10 +2996,10 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	VectorCopy(sky_matrix[0], ubo->environment_rotation_matrix + 0);
 	VectorCopy(sky_matrix[1], ubo->environment_rotation_matrix + 4);
 	VectorCopy(sky_matrix[2], ubo->environment_rotation_matrix + 8);
-	
+
 	add_dlights(vkpt_refdef.fd->dlights, vkpt_refdef.fd->num_dlights, ubo);
 	add_elights(vkpt_refdef.fd, ubo);
-	
+	//add_elights(entlights, num_entlights, ubo);
 
 	const bsp_mesh_t* wm = &vkpt_refdef.bsp_mesh_world;
 	if (wm->num_cameras > 0)
@@ -3031,7 +3048,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 	}
 
 	mleaf_t* viewleaf = bsp_world_model ? BSP_PointLeaf(bsp_world_model->nodes, fd->vieworg) : NULL;
-	
+
 	qboolean sun_visible_prev = qfalse;
 	static float prev_adapted_luminance = 0.f;
 	float adapted_luminance = 0.f;
@@ -3039,9 +3056,9 @@ R_RenderFrame_RTX(refdef_t *fd)
 
 	// Sometimes, the readback returns 1.0 luminance instead of the real value.
 	// Ignore these mysterious spikes.
-	if (adapted_luminance != 1.0f) 
+	if (adapted_luminance != 1.0f)
 		prev_adapted_luminance = adapted_luminance;
-	
+
 	if (prev_adapted_luminance <= 0.f)
 		prev_adapted_luminance = 0.005f;
 
@@ -3064,7 +3081,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 	reference_mode_t ref_mode;
 	evaluate_reference_mode(&ref_mode);
 	evaluate_taa_settings(&ref_mode);
-	
+
 	qboolean menu_mode = cl_paused->integer == 1 && uis.menuDepth > 0 && render_world;
 
 	int new_world_anim_frame = (int)(fd->time * 2);
@@ -3096,7 +3113,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 	vec3_t sky_radiance;
 	VectorScale(avg_envmap_color, ubo->pt_env_scale, sky_radiance);
 	vkpt_light_buffer_upload_to_staging(render_world, &vkpt_refdef.bsp_mesh_world, bsp_world_model, num_model_lights, model_lights, sky_radiance);
-	
+
 	float shadowmap_view_proj[16];
 	float shadowmap_depth_scale;
 	vkpt_shadow_map_setup(
@@ -3145,11 +3162,11 @@ R_RenderFrame_RTX(refdef_t *fd)
 		}
 
 		vkpt_submit_command_buffer(
-			transfer_cmd_buf, 
-			qvk.queue_transfer, 
-			all_device_mask, 
-			(*prev_trace_signaled) ? qvk.device_count : 0, prev_trace_semaphores, wait_stages, device_indices, 
-			qvk.device_count, transfer_semaphores, device_indices, 
+			transfer_cmd_buf,
+			qvk.queue_transfer,
+			all_device_mask,
+			(*prev_trace_signaled) ? qvk.device_count : 0, prev_trace_semaphores, wait_stages, device_indices,
+			qvk.device_count, transfer_semaphores, device_indices,
 			VK_NULL_HANDLE);
 
 		*prev_trace_signaled = qfalse;
@@ -3162,7 +3179,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 
 		_VK(vkpt_uniform_buffer_update(trace_cmd_buf));
 
-		// put a profiler query without a marker for the frame begin/end - because markers do not 
+		// put a profiler query without a marker for the frame begin/end - because markers do not
 		// work well across different command lists
 		_VK(vkpt_profiler_query(trace_cmd_buf, PROFILER_FRAME_TIME, PROFILER_START));
 
@@ -3255,7 +3272,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 		}
 
 		vkpt_pt_trace_lighting(trace_cmd_buf, ref_mode.num_bounce_rays);
-		
+
 		vkpt_submit_command_buffer(
 			trace_cmd_buf,
 			qvk.queue_graphics,
@@ -3316,8 +3333,14 @@ R_RenderFrame_RTX(refdef_t *fd)
 		vkpt_submit_command_buffer_simple(post_cmd_buf, qvk.queue_graphics, qtrue);
 	}
 
+	{
+		if (cvar_rtx_polyblend->integer && vkpt_refdef.fd->blend[3] != 0) {
+			RTX_Blend(vkpt_refdef.fd->blend);
+		}
+	}
+
 	temporal_frame_valid = ref_mode.enable_denoiser;
-	
+
 	frame_ready = qtrue;
 
 	if (vkpt_refdef.fd && vkpt_refdef.fd->lightstyles) {
@@ -3348,7 +3371,7 @@ static int compare_doubles(const void* pa, const void* pb)
 	double a = *(double*)pa;
 	double b = *(double*)pb;
 
-	if (a < b) return -1; 
+	if (a < b) return -1;
 	if (a > b) return 1;
 	return 0;
 }
@@ -3449,7 +3472,7 @@ R_BeginFrame_RTX(void)
 	qvk.current_frame_index = qvk.frame_counter % MAX_FRAMES_IN_FLIGHT;
 
 	VkResult res_fence = vkWaitForFences(qvk.device, 1, qvk.fences_frame_sync + qvk.current_frame_index, VK_TRUE, ~((uint64_t) 0));
-	
+
 	if (res_fence == VK_ERROR_DEVICE_LOST)
 	{
 		// TODO implement a good error box or vid_restart or something
@@ -3477,7 +3500,7 @@ R_BeginFrame_RTX(void)
 
 	qvk.extent_render = get_render_extent();
 	qvk.gpu_slice_width = (qvk.extent_render.width + qvk.device_count - 1) / qvk.device_count;
-	
+
 	VkExtent2D extent_screen_images = get_screen_image_extent();
 
 	if(!extents_equal(extent_screen_images, qvk.extent_screen_images))
@@ -3794,6 +3817,12 @@ R_Init_RTX(qboolean total)
 	scr_viewsize = Cvar_Get("viewsize", "100", CVAR_ARCHIVE);
 	scr_viewsize->changed = viewsize_changed;
 
+	cvar_entlights_show = Cvar_Get("cl_entlights_show", "0", 0);
+	cvar_entlights_scale = Cvar_Get("cl_entlights_scale", "0.05", 0);
+	cvar_entlights_enabled = Cvar_Get("cl_entlights_enabled", "1", 0);
+	cvar_rtx_polyblend = Cvar_Get("rtx_polyblend", "1", 0);
+
+	drs_init();
 
 	cvar_entlights_show = Cvar_Get("cl_entlights_show", "0", 0);
 	cvar_entlights_scale = Cvar_Get("cl_entlights_scale", "0.05", 0);
@@ -3851,7 +3880,7 @@ R_Init_RTX(qboolean total)
 	IMG_Init();
 	IMG_GetPalette();
 	MOD_Init();
-	
+
 	if(!init_vulkan()) {
 		Com_Error(ERR_FATAL, "Couldn't initialize Vulkan.\n");
 		return qfalse;
@@ -3894,7 +3923,7 @@ R_Shutdown_RTX(qboolean total)
 	vkpt_freecam_reset();
 
 	vkDeviceWaitIdle(qvk.device);
-	
+
 	Cmd_RemoveCommand("reload_shader");
 	Cmd_RemoveCommand("reload_textures");
 	Cmd_RemoveCommand("show_pvs");
@@ -3941,7 +3970,7 @@ IMG_ReadPixels_RTX(int *width, int *height, int *rowbytes)
 		.baseArrayLayer = 0,
 		.layerCount = 1
 	};
-		
+
 	IMAGE_BARRIER(cmd_buf,
 		.image = swap_chain_image,
 		.subresourceRange = subresource_range,
@@ -4003,7 +4032,7 @@ IMG_ReadPixels_RTX(int *width, int *height, int *rowbytes)
 
 	void *device_data;
 	_VK(vkMapMemory(qvk.device, qvk.screenshot_image_memory, 0, qvk.screenshot_image_memory_size, 0, &device_data));
-	
+
 	int pitch = qvk.extent_unscaled.width * 3;
 	byte *pixels = FS_AllocTempMem(pitch * qvk.extent_unscaled.height);
 
@@ -4155,6 +4184,7 @@ R_BeginRegistration_RTX(const char *name)
 	else {
 		num_entlights = 0;
 	}
+
 	bsp_mesh_register_textures(bsp);
 	bsp_mesh_create_from_bsp(&vkpt_refdef.bsp_mesh_world, bsp, name);
 	vkpt_light_stats_create(&vkpt_refdef.bsp_mesh_world);
@@ -4178,7 +4208,7 @@ R_BeginRegistration_RTX(const char *name)
 	vkpt_pt_destroy_static();
 	const bsp_mesh_t *m = &vkpt_refdef.bsp_mesh_world;
 	_VK(vkpt_pt_create_static(
-		m->world_idx_count, 
+		m->world_idx_count,
 		m->world_transparent_count,
 		m->world_masked_count,
 		m->world_sky_count,
@@ -4192,7 +4222,7 @@ void
 R_EndRegistration_RTX(void)
 {
 	LOG_FUNC();
-	
+
 	vkpt_physical_sky_endRegistration();
 
 	IMG_FreeUnused();

@@ -319,6 +319,7 @@ void CL_InitRefresh(void)
 		CVAR_REFRESH | CVAR_ARCHIVE);
 
     vid_muzzleflash = Cvar_Get("vid_muzzleflash", "0", CVAR_ARCHIVE);
+
     vid_fullscreen = Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
     _vid_fullscreen = Cvar_Get("_vid_fullscreen", "1", CVAR_ARCHIVE);
     vid_modelist = Cvar_Get("vid_modelist", modelist, 0);

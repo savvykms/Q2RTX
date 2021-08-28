@@ -452,11 +452,11 @@ void CL_MuzzleFlash(void)
 	// Q2RTX
 	}
 
-    if (!vid_muzzleflash->integer)
-    {
-        // don't add muzzle flashes in RTX mode
-        DL_RADIUS(0.f);
-    }
+	if (!vid_muzzleflash->integer)
+	{
+		// don't add muzzle flashes in RTX mode
+		DL_RADIUS(0.f);
+	}
 }
 
 
