@@ -1556,7 +1556,6 @@ static inline uint32_t fill_model_instance(const entity_t* entity, const model_t
 
 		if (entity->flags & RF_SHELL_GREEN)
 			material_id |= MATERIAL_FLAG_SHELL_GREEN;
-		}
 		else
 		{
 			if ((entity->flags & RF_IR_VISIBLE) && (vkpt_refdef.fd->rdflags & RDF_IRGOGGLES))
