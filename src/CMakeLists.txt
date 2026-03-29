@@ -284,6 +284,7 @@ SET(SRC_VKPT
 	refresh/vkpt/device_memory_allocator.c
 	refresh/vkpt/god_rays.c
 	refresh/vkpt/conversion.c
+	refresh/vkpt/entlights.c
 )
 
 SET(HEADERS_VKPT
@@ -297,6 +298,7 @@ SET(HEADERS_VKPT
 	refresh/vkpt/physical_sky.h
 	refresh/vkpt/precomputed_sky.h
 	refresh/vkpt/conversion.h
+	refresh/vkpt/entlights.h
 )
 
 set(SRC_SHADERS
@@ -503,6 +505,9 @@ IF (TARGET client)
         ENDIF()
         if (CONFIG_VKPT_ENABLE_IMAGE_DUMPS)
             TARGET_COMPILE_DEFINITIONS(client PRIVATE VKPT_IMAGE_DUMPS)
+        ENDIF()
+        IF (CONFIG_SAVVY_ENTLIGHTS)
+            TARGET_COMPILE_DEFINITIONS(client PRIVATE SAVVY_ENTLIGHTS=1)
         ENDIF()
         IF (WIN32)
         TARGET_LINK_LIBRARIES(client vulkan-1)

@@ -52,7 +52,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <assert.h>
 
 #ifdef SAVVY_ENTLIGHTS
-#include "refresh/entlights.h"
+#include "entlights.h"
 #endif
 
 cvar_t *cvar_profiler = NULL;
