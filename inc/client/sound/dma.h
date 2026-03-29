@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef DMA_H
-#define DMA_H
+#pragma once
 
 typedef struct dma_s {
     int         channels;
@@ -35,24 +34,16 @@ typedef enum {
     SIS_NOTAVAIL
 } sndinitstat_t;
 
-typedef struct snddmaAPI_s {
-    sndinitstat_t (*Init)(void);
-    void (*Shutdown)(void);
-    void (*BeginPainting)(void);
-    void (*Submit)(void);
-    void (*Activate)(qboolean active);
-} snddmaAPI_t;
-
-void WAVE_FillAPI(snddmaAPI_t *api);
-
-#if USE_DSOUND
-void DS_FillAPI(snddmaAPI_t *api);
-#endif
+typedef struct {
+    const char *name;
+    sndinitstat_t (*init)(void);
+    void (*shutdown)(void);
+    void (*begin_painting)(void);
+    void (*submit)(void);
+    void (*activate)(bool active);
+} snddma_driver_t;
 
 extern dma_t    dma;
-extern int      paintedtime;
+extern int      s_paintedtime;
 
 extern cvar_t   *s_khz;
-extern cvar_t   *s_testsound;
-
-#endif // DMA_H

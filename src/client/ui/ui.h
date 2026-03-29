@@ -17,6 +17,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#pragma once
+
 #include "shared/shared.h"
 #include "shared/list.h"
 #include "common/cmd.h"
@@ -34,7 +36,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define UI_Mallocz(s)       Z_TagMallocz(s, TAG_UI)
 #define UI_CopyString(s)    Z_TagCopyString(s, TAG_UI)
 
-#define MAXMENUITEMS    64
+#define MIN_MENU_ITEMS  64
+#define MAX_MENU_ITEMS  250000000
 
 typedef enum {
     MTYPE_BAD,
@@ -56,13 +59,13 @@ typedef enum {
     MTYPE_LOADGAME
 } menuType_t;
 
-#define QMF_LEFT_JUSTIFY    0x00000001
-#define QMF_GRAYED          0x00000002
-#define QMF_NUMBERSONLY     0x00000004
-#define QMF_HASFOCUS        0x00000008
-#define QMF_HIDDEN          0x00000010
-#define QMF_DISABLED        0x00000020
-#define QMF_CUSTOM_COLOR    0x00000040
+#define QMF_LEFT_JUSTIFY    BIT(0)
+#define QMF_GRAYED          BIT(1)
+#define QMF_NUMBERSONLY     BIT(2)
+#define QMF_HASFOCUS        BIT(3)
+#define QMF_HIDDEN          BIT(4)
+#define QMF_DISABLED        BIT(5)
+#define QMF_CUSTOM_COLOR    BIT(6)
 
 typedef enum {
     QMS_NOTHANDLED,
@@ -87,12 +90,10 @@ typedef enum {
      (item)->type != MTYPE_STATIC && \
      !((item)->flags & (QMF_GRAYED | QMF_HIDDEN | QMF_DISABLED)))
 
-typedef void (*confirmAction_t)(qboolean);
-
 typedef struct menuCondition_s {
 	cvar_t *cvar;
 	int value;
-	qboolean equals;
+	bool equals;
 } menuCondition_t;
 
 typedef struct menuFrameWork_s {
@@ -100,12 +101,12 @@ typedef struct menuFrameWork_s {
 
     char    *name, *title, *status;
 
+    void    **items;
     int     nitems;
-    void    *items[MAXMENUITEMS];
 
-    qboolean compact;
-    qboolean transparent;
-    qboolean keywait;
+    bool compact;
+    bool transparent;
+    bool keywait;
 
     qhandle_t image;
     color_t color;
@@ -128,7 +129,7 @@ typedef struct menuFrameWork_s {
 
 	menuCondition_t current_condition;
 
-    qboolean (*push)(struct menuFrameWork_s *);
+    bool (*push)(struct menuFrameWork_s *);
     void (*pop)(struct menuFrameWork_s *);
     void (*expose)(struct menuFrameWork_s *);
     void (*draw)(struct menuFrameWork_s *);
@@ -157,7 +158,7 @@ typedef struct menuCommon_s {
     menuSound_t (*activate)(struct menuCommon_s *);
     menuSound_t (*change)(struct menuCommon_s *);
     menuSound_t (*keydown)(struct menuCommon_s *, int key);
-    menuSound_t (*focus)(struct menuCommon_s *, qboolean gain);
+    menuSound_t (*focus)(struct menuCommon_s *, bool gain);
 } menuCommon_t;
 
 typedef struct menuField_s {
@@ -172,14 +173,14 @@ typedef struct menuField_s {
 typedef struct menuSlider_s {
     menuCommon_t generic;
     cvar_t *cvar;
-    qboolean modified;
+    bool modified;
 
     float minvalue;
     float maxvalue;
     float curvalue;
     float step;
     char* format;
-    qboolean percentage;
+    bool percentage;
 } menuSlider_t;
 
 #define MAX_COLUMNS     8
@@ -190,12 +191,12 @@ typedef struct menuSlider_s {
 #define MLIST_PRESTEP           3
 #define MLIST_PADDING           (MLIST_PRESTEP*2)
 
-#define MLF_HEADER      0x00000001
-#define MLF_SCROLLBAR   0x00000002
-#define MLF_COLOR       0x00000004
+#define MLF_HEADER      BIT(0)
+#define MLF_SCROLLBAR   BIT(1)
+#define MLF_COLOR       BIT(2)
 
 typedef struct menuListColumn_s {
-    char *name;
+    const char *name;
     int width;
     int uiFlags;
 } menuListColumn_t;
@@ -209,13 +210,15 @@ typedef struct menuList_s {
     int         mlFlags;
     int         extrasize;
 
-    int        prestep;
-    int        curvalue;
-    int        clickTime;
+    int         prestep;
+    int         curvalue;
+    unsigned    clickTime;
 
-    char    scratch[8];
-    int     scratchCount;
-    int     scratchTime;
+#if 0
+    char        scratch[8];
+    int         scratchCount;
+    unsigned    scratchTime;
+#endif
 
     int     drag_y;
 
@@ -236,7 +239,7 @@ typedef struct menuSpinControl_s {
     int     curvalue;
 
     int         mask;
-    qboolean    negate;
+    bool        negate;
 } menuSpinControl_t;
 
 typedef struct menuAction_s {
@@ -287,8 +290,8 @@ void PlayerModel_Free(void);
 #define NUM_CURSOR_FRAMES 15
 
 typedef struct uiStatic_s {
-    qboolean initialized;
-    int realtime;
+    bool initialized;
+    unsigned realtime;
     int width, height; // scaled
     float scale;
     int menuDepth;
@@ -296,9 +299,9 @@ typedef struct uiStatic_s {
     menuFrameWork_t *activeMenu;
     menuCommon_t *mouseTracker;
     int mouseCoords[2];
-    qboolean entersound;        // play after drawing a frame, so caching
-                                // won't disrupt the sound
-    qboolean transparent;
+    bool entersound;        // play after drawing a frame, so caching
+                            // won't disrupt the sound
+    bool transparent;
     int numPlayerModels;
     playerModelInfo_t pmi[MAX_PLAYERMODELS];
     char weaponModel[32];
@@ -329,8 +332,8 @@ void        UI_PushMenu(menuFrameWork_t *menu);
 void        UI_ForceMenuOff(void);
 void        UI_PopMenu(void);
 void        UI_StartSound(menuSound_t sound);
-qboolean    UI_DoHitTest(void);
-qboolean    UI_CursorInRect(vrect_t *rect);
+bool        UI_DoHitTest(void);
+bool        UI_CursorInRect(vrect_t *rect);
 void        *UI_FormatColumns(int extrasize, ...) q_sentinel;
 char        *UI_GetColumn(char *s, int n);
 void        UI_DrawString(int x, int y, int flags, const char *string);
@@ -361,7 +364,7 @@ void        MenuList_SetValue(menuList_t *l, int value);
 void        MenuList_Sort(menuList_t *l, int offset,
                           int (*cmpfunc)(const void *, const void *));
 void SpinControl_Init(menuSpinControl_t *s);
-qboolean    Menu_Push(menuFrameWork_t *menu);
+bool        Menu_Push(menuFrameWork_t *menu);
 void        Menu_Pop(menuFrameWork_t *menu);
 void        Menu_Free(menuFrameWork_t *menu);
 

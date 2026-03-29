@@ -63,7 +63,7 @@ typedef struct gtv_s {
     size_t      msglen;
     unsigned    flags;
 #if USE_ZLIB
-    qboolean    z_act; // true when actively inflating
+    bool        z_act; // true when actively inflating
     z_stream    z_str;
     fifo_t      z_buf;
 #endif
@@ -76,8 +76,9 @@ typedef struct gtv_s {
     qhandle_t       demoplayback;
     int             demoloop, demoskip;
     string_entry_t  *demohead, *demoentry;
-    size_t          demosize, demopos;
-    qboolean        demowait;
+    int64_t         demosize, demoofs;
+    float           demoprogress;
+    bool            demowait;
 } gtv_t;
 
 static const char *const gtv_states[GTV_NUM_STATES] = {
@@ -99,15 +100,15 @@ LIST_DECL(mvd_gtv_list);
 LIST_DECL(mvd_channel_list);
 
 mvd_t       mvd_waitingRoom;
-qboolean    mvd_dirty;
+bool        mvd_dirty;
 int         mvd_chanid;
 
-qboolean    mvd_active;
+bool        mvd_active;
 unsigned    mvd_last_activity;
 
 jmp_buf     mvd_jmpbuf;
 
-#ifdef _DEBUG
+#if USE_DEBUG
 cvar_t      *mvd_shownet;
 #endif
 
@@ -129,21 +130,20 @@ void MVD_StopRecord(mvd_t *mvd)
     msglen = 0;
     FS_Write(&msglen, 2, mvd->demorecording);
 
-    FS_FCloseFile(mvd->demorecording);
+    FS_CloseFile(mvd->demorecording);
     mvd->demorecording = 0;
 
-    Z_Free(mvd->demoname);
-    mvd->demoname = NULL;
+    Z_Freep((void**)&mvd->demoname);
 }
 
 static void MVD_Free(mvd_t *mvd)
 {
-    mvd_snap_t *snap, *next;
     int i;
 
-    LIST_FOR_EACH_SAFE(mvd_snap_t, snap, next, &mvd->snapshots, entry) {
-        Z_Free(snap);
+    for (i = 0; i < mvd->numsnapshots; i++) {
+        Z_Free(mvd->snapshots[i]);
     }
+    Z_Free(mvd->snapshots);
 
     // stop demo recording
     if (mvd->demorecording) {
@@ -170,7 +170,7 @@ static void MVD_Destroy(mvd_t *mvd)
 
     // update channel menus
     if (!LIST_EMPTY(&mvd->entry)) {
-        mvd_dirty = qtrue;
+        mvd_dirty = true;
     }
 
     // cause UDP clients to reconnect
@@ -218,7 +218,7 @@ static mvd_t *find_local_channel(void)
 
     FOR_EACH_MVD(mvd) {
         FOR_EACH_MVDCL(client, mvd) {
-            if (NET_IsLocalAddress(&client->cl->netchan->remote_address)) {
+            if (NET_IsLocalAddress(&client->cl->netchan.remote_address)) {
                 return mvd;
             }
         }
@@ -255,7 +255,7 @@ mvd_t *MVD_SetChannel(int arg)
     } else
 #endif
         if (COM_IsUint(s)) {
-            id = atoi(s);
+            id = Q_atoi(s);
             FOR_EACH_MVD(mvd) {
                 if (mvd->id == id) {
                     return mvd;
@@ -323,12 +323,12 @@ static mvd_t *create_channel(gtv_t *gtv)
     mvd->gtv = gtv;
     mvd->id = gtv->id;
     Q_strlcpy(mvd->name, gtv->name, sizeof(mvd->name));
-    mvd->pool.edicts = mvd->edicts;
-    mvd->pool.edict_size = sizeof(edict_t);
-    mvd->pool.max_edicts = MAX_EDICTS;
+    mvd->ge.edicts = mvd->edicts;
+    mvd->ge.edict_size = sizeof(edict_t);
+    mvd->ge.max_edicts = MAX_EDICTS;
     mvd->pm_type = PM_SPECTATOR;
-    mvd->min_packets = mvd_wait_delay->value * 10;
-    List_Init(&mvd->snapshots);
+    mvd->min_packets = mvd_wait_delay->integer;
+    mvd->csr = &cs_remap_old;
     List_Init(&mvd->clients);
     List_Init(&mvd->entry);
 
@@ -355,7 +355,7 @@ static gtv_t *gtv_set_conn(int arg)
     }
 
     if (COM_IsUint(s)) {
-        id = atoi(s);
+        id = Q_atoi(s);
         FOR_EACH_GTV(gtv) {
             if (gtv->id == id) {
                 return gtv;
@@ -375,23 +375,21 @@ static gtv_t *gtv_set_conn(int arg)
 
 static void set_mvd_active(void)
 {
-    unsigned delta = mvd_suspend_time->value * 60 * 1000;
-
     // zero timeout = always active
-    if (delta == 0)
+    if (!mvd_suspend_time->integer)
         mvd_last_activity = svs.realtime;
 
-    if (svs.realtime - mvd_last_activity > delta) {
+    if (svs.realtime - mvd_last_activity > mvd_suspend_time->integer) {
         if (mvd_active) {
             Com_DPrintf("Suspending MVD streams.\n");
-            mvd_active = qfalse;
-            mvd_dirty = qtrue;
+            mvd_active = false;
+            mvd_dirty = true;
         }
     } else {
         if (!mvd_active) {
             Com_DPrintf("Resuming MVD streams.\n");
-            mvd_active = qtrue;
-            mvd_dirty = qtrue;
+            mvd_active = true;
+            mvd_dirty = true;
         }
     }
 }
@@ -428,29 +426,30 @@ int MVD_Frame(void)
 }
 
 #if USE_CLIENT
-int MVD_GetDemoPercent(qboolean *paused, int *framenum)
+bool MVD_GetDemoStatus(float *progress, bool *paused, int *framenum)
 {
     mvd_t *mvd;
     gtv_t *gtv;
 
     if ((mvd = find_local_channel()) == NULL)
-        return -1;
+        return false;
 
     if ((gtv = mvd->gtv) == NULL)
-        return -1;
+        return false;
 
     if (!gtv->demoplayback)
-        return -1;
-
-    if (paused)
-        *paused = mvd->state == MVD_WAITING ? qtrue : qfalse;
-    if (framenum)
-        *framenum = mvd->framenum;
+        return false;
 
     if (!gtv->demosize)
-        return -1;
+        return false;
 
-    return gtv->demopos * 100 / gtv->demosize;
+    if (progress)
+        *progress = gtv->demoprogress;
+    if (paused)
+        *paused = mvd->state == MVD_WAITING;
+    if (framenum)
+        *framenum = mvd->framenum;
+    return true;
 }
 #endif
 
@@ -466,10 +465,10 @@ static void demo_play_next(gtv_t *gtv, string_entry_t *entry);
 
 static void emit_base_frame(mvd_t *mvd);
 
-static ssize_t demo_load_message(qhandle_t f)
+static int demo_load_message(qhandle_t f)
 {
     uint16_t us;
-    ssize_t msglen, read;
+    int msglen, read;
 
     read = FS_Read(&us, 2, f);
     if (read != 2) {
@@ -493,9 +492,9 @@ static ssize_t demo_load_message(qhandle_t f)
     return read;
 }
 
-static ssize_t demo_skip_map(qhandle_t f)
+static int demo_skip_map(qhandle_t f)
 {
-    ssize_t msglen;
+    int msglen;
 
     while (1) {
         if ((msglen = demo_load_message(f)) <= 0) {
@@ -512,9 +511,9 @@ static ssize_t demo_skip_map(qhandle_t f)
     return msglen;
 }
 
-static ssize_t demo_read_message(qhandle_t f)
+static int demo_read_message(qhandle_t f)
 {
-    ssize_t msglen;
+    int msglen;
 
     if ((msglen = demo_load_message(f)) <= 0) {
         return msglen;
@@ -526,11 +525,10 @@ static ssize_t demo_read_message(qhandle_t f)
     return msglen;
 }
 
-static ssize_t demo_read_first(qhandle_t f)
+static int demo_read_first(qhandle_t f)
 {
     uint32_t magic;
-    ssize_t read;
-    qerror_t ret;
+    int read;
 
     // read magic
     read = FS_Read(&magic, 4, f);
@@ -538,17 +536,6 @@ static ssize_t demo_read_first(qhandle_t f)
         return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
     }
 
-    // check for gzip header
-    if (CHECK_GZIP_HEADER(magic)) {
-        ret = FS_FilterFile(f);
-        if (ret) {
-            return ret;
-        }
-        read = FS_Read(&magic, 4, f);
-        if (read != 4) {
-            return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
-        }
-    }
     if (magic != MVD_MAGIC) {
         return Q_ERR_UNKNOWN_FORMAT;
     }
@@ -558,21 +545,27 @@ static ssize_t demo_read_first(qhandle_t f)
     return read ? read : Q_ERR_UNEXPECTED_EOF;
 }
 
+#define MIN_SNAPSHOTS   64
+#define MAX_SNAPSHOTS   250000000
+
 // periodically builds a fake demo packet used to reconstruct delta compression
 // state, configstrings and layouts at the given server frame.
 static void demo_emit_snapshot(mvd_t *mvd)
 {
     mvd_snap_t *snap;
     gtv_t *gtv;
-    off_t pos;
+    int64_t pos;
     char *from, *to;
     size_t len;
-    int i;
+    int i, bits;
 
     if (mvd_snaps->integer <= 0)
         return;
 
     if (mvd->framenum < mvd->last_snapshot + mvd_snaps->integer * 10)
+        return;
+
+    if (mvd->numsnapshots >= MAX_SNAPSHOTS)
         return;
 
     gtv = mvd->gtv;
@@ -583,7 +576,7 @@ static void demo_emit_snapshot(mvd_t *mvd)
         return;
 
     pos = FS_Tell(gtv->demoplayback);
-    if (pos < gtv->demopos)
+    if (pos < gtv->demoofs)
         return;
 
     // write baseline frame
@@ -591,65 +584,109 @@ static void demo_emit_snapshot(mvd_t *mvd)
     emit_base_frame(mvd);
 
     // write configstrings
-    for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
+    for (i = 0; i < mvd->csr->end; i++) {
         from = mvd->baseconfigstrings[i];
         to = mvd->configstrings[i];
 
         if (!strcmp(from, to))
             continue;
 
-        len = strlen(to);
-        if (len > MAX_QPATH)
-            len = MAX_QPATH;
-
+        len = Q_strnlen(to, MAX_QPATH);
         MSG_WriteByte(mvd_configstring);
         MSG_WriteShort(i);
         MSG_WriteData(to, len);
         MSG_WriteByte(0);
     }
 
-    // TODO: write private layouts/configstrings
+    // write private configstrings
+    for (i = 0; i < mvd->maxclients; i++) {
+        mvd_player_t *player = &mvd->players[i];
+        mvd_cs_t *cs;
+
+        if (!player->configstrings)
+            continue;
+
+        len = 0;
+        for (cs = player->configstrings; cs; cs = cs->next)
+            len += 4 + strlen(cs->string);
+
+        bits = (len >> 8) & 7;
+        MSG_WriteByte(mvd_unicast | (bits << SVCMD_BITS));
+        MSG_WriteByte(len & 255);
+        MSG_WriteByte(i);
+        for (cs = player->configstrings; cs; cs = cs->next) {
+            MSG_WriteByte(svc_configstring);
+            MSG_WriteShort(cs->index);
+            MSG_WriteString(cs->string);
+        }
+    }
+
+    // write layout
+    if (mvd->clientNum != -1) {
+        len = 2 + strlen(mvd->layout);
+        bits = (len >> 8) & 7;
+        MSG_WriteByte(mvd_unicast | (bits << SVCMD_BITS));
+        MSG_WriteByte(len & 255);
+        MSG_WriteByte(mvd->clientNum);
+        MSG_WriteByte(svc_layout);
+        MSG_WriteString(mvd->layout);
+    }
 
     snap = MVD_Malloc(sizeof(*snap) + msg_write.cursize - 1);
     snap->framenum = mvd->framenum;
     snap->filepos = pos;
     snap->msglen = msg_write.cursize;
     memcpy(snap->data, msg_write.data, msg_write.cursize);
-    List_Append(&mvd->snapshots, &snap->entry);
 
-    Com_DPrintf("[%d] snaplen %"PRIz"\n", mvd->framenum, msg_write.cursize);
+    if (!mvd->snapshots)
+        mvd->snapshots = MVD_Malloc(sizeof(snap) * MIN_SNAPSHOTS);
+    else
+        mvd->snapshots = Z_Realloc(mvd->snapshots, sizeof(snap) * ALIGN(mvd->numsnapshots + 1, MIN_SNAPSHOTS));
+    mvd->snapshots[mvd->numsnapshots++] = snap;
+
+    Com_DPrintf("[%d] snaplen %zu\n", mvd->framenum, msg_write.cursize);
 
     SZ_Clear(&msg_write);
 
     mvd->last_snapshot = mvd->framenum;
 }
 
-static mvd_snap_t *demo_find_snapshot(mvd_t *mvd, int framenum)
+static mvd_snap_t *demo_find_snapshot(mvd_t *mvd, int64_t dest, bool byte_seek)
 {
-    mvd_snap_t *snap, *prev;
+    int l = 0;
+    int r = mvd->numsnapshots - 1;
 
-    if (LIST_EMPTY(&mvd->snapshots))
+    if (r < 0)
         return NULL;
 
-    prev = LIST_FIRST(mvd_snap_t, &mvd->snapshots, entry);
+    do {
+        int m = (l + r) / 2;
+        mvd_snap_t *snap = mvd->snapshots[m];
+        int64_t pos = byte_seek ? snap->filepos : snap->framenum;
+        if (pos < dest)
+            l = m + 1;
+        else if (pos > dest)
+            r = m - 1;
+        else
+            return snap;
+    } while (l <= r);
 
-    LIST_FOR_EACH(mvd_snap_t, snap, &mvd->snapshots, entry) {
-        if (snap->framenum > framenum)
-            break;
-        prev = snap;
-    }
-
-    return prev;
+    return mvd->snapshots[max(r, 0)];
 }
 
 static void demo_update(gtv_t *gtv)
 {
     if (gtv->demosize) {
-        gtv->demopos = FS_Tell(gtv->demoplayback);
+        int64_t pos = FS_Tell(gtv->demoplayback);
+
+        if (pos > gtv->demoofs)
+            gtv->demoprogress = (float)(pos - gtv->demoofs) / gtv->demosize;
+        else
+            gtv->demoprogress = 0.0f;
     }
 }
 
-static void demo_finish(gtv_t *gtv, ssize_t ret)
+static void demo_finish(gtv_t *gtv, int ret)
 {
     if (ret < 0) {
         gtv_destroyf(gtv, "Couldn't read %s: %s", gtv->demoentry->string, Q_ErrorString(ret));
@@ -658,14 +695,14 @@ static void demo_finish(gtv_t *gtv, ssize_t ret)
     demo_play_next(gtv, gtv->demoentry->next);
 }
 
-static qboolean demo_read_frame(mvd_t *mvd)
+static bool demo_read_frame(mvd_t *mvd)
 {
     gtv_t *gtv = mvd->gtv;
     int count;
-    ssize_t ret;
+    int ret;
 
     if (mvd->state == MVD_WAITING) {
-        return qfalse; // paused by user
+        return false; // paused by user
     }
 
     if (!gtv) {
@@ -673,8 +710,8 @@ static qboolean demo_read_frame(mvd_t *mvd)
     }
 
     if (gtv->demowait) {
-        gtv->demowait = qfalse;
-        return qfalse;
+        gtv->demowait = false;
+        return false;
     }
 
     count = gtv->demoskip;
@@ -699,16 +736,17 @@ static qboolean demo_read_frame(mvd_t *mvd)
 
     MVD_ParseMessage(mvd);
     demo_emit_snapshot(mvd);
-    return qtrue;
+    return true;
 
 next:
     demo_finish(gtv, ret);
-    return qtrue;
+    return true;
 }
 
 static void demo_play_next(gtv_t *gtv, string_entry_t *entry)
 {
-    ssize_t len, ret;
+    int64_t len, ofs;
+    int ret;
 
     if (!entry) {
         if (gtv->demoloop) {
@@ -721,12 +759,12 @@ static void demo_play_next(gtv_t *gtv, string_entry_t *entry)
 
     // close previous file
     if (gtv->demoplayback) {
-        FS_FCloseFile(gtv->demoplayback);
+        FS_CloseFile(gtv->demoplayback);
         gtv->demoplayback = 0;
     }
 
     // open new file
-    len = FS_FOpenFile(entry->string, &gtv->demoplayback, FS_MODE_READ);
+    len = FS_OpenFile(entry->string, &gtv->demoplayback, FS_MODE_READ | FS_FLAG_GZIP);
     if (!gtv->demoplayback) {
         gtv_destroyf(gtv, "Couldn't open %s: %s", entry->string, Q_ErrorString(len));
     }
@@ -742,7 +780,7 @@ static void demo_play_next(gtv_t *gtv, string_entry_t *entry)
         gtv->mvd = create_channel(gtv);
         gtv->mvd->read_frame = demo_read_frame;
     } else {
-        gtv->mvd->demoseeking = qfalse;
+        gtv->mvd->demoseeking = false;
     }
 
     Com_Printf("[%s] -=- Reading from %s\n", gtv->name, entry->string);
@@ -761,13 +799,12 @@ static void demo_play_next(gtv_t *gtv, string_entry_t *entry)
     // set channel address
     Q_strlcpy(gtv->address, COM_SkipPath(entry->string), sizeof(gtv->address));
 
-    len = FS_Length(gtv->demoplayback);
-    ret = FS_Tell(gtv->demoplayback);
-    if (len > 0 && ret > 0) {
-        gtv->demosize = len;
-        gtv->demopos = ret;
+    ofs = FS_Tell(gtv->demoplayback);
+    if (ofs > 0 && ofs < len) {
+        gtv->demoofs = ofs;
+        gtv->demosize = len - ofs;
     } else {
-        gtv->demosize = gtv->demopos = 0;
+        gtv->demosize = gtv->demoofs = 0;
     }
 
     demo_emit_snapshot(gtv->mvd);
@@ -796,7 +833,7 @@ static void demo_destroy(gtv_t *gtv)
     }
 
     if (gtv->demoplayback) {
-        FS_FCloseFile(gtv->demoplayback);
+        FS_CloseFile(gtv->demoplayback);
         gtv->demoplayback = 0;
     }
 
@@ -827,10 +864,8 @@ static void write_stream(gtv_t *gtv, void *data, size_t len)
 static void write_message(gtv_t *gtv, gtv_clientop_t op)
 {
     byte header[3];
-    size_t len = msg_write.cursize + 1;
 
-    header[0] = len & 255;
-    header[1] = (len >> 8) & 255;
+    WL16(header, msg_write.cursize + 1);
     header[2] = op;
     write_stream(gtv, header, sizeof(header));
 
@@ -850,7 +885,7 @@ static void q_noreturn gtv_oob_kill(mvd_t *mvd)
     MVD_Destroyf(mvd, "Ran out of buffers");
 }
 
-static qboolean gtv_wait_stop(mvd_t *mvd)
+static bool gtv_wait_stop(mvd_t *mvd)
 {
     gtv_t *gtv = mvd->gtv;
     int min_packets = mvd->min_packets, usage;
@@ -871,12 +906,12 @@ static qboolean gtv_wait_stop(mvd_t *mvd)
 
     // see how much data is buffered
     usage = FIFO_Percent(&mvd->delay);
-    if (usage >= mvd_wait_percent->value) {
+    if (usage >= mvd_wait_percent->integer) {
         Com_Printf("[%s] -=- Buffering finished, reading...\n", mvd->name);
         goto stop;
     }
 
-    return qfalse;
+    return false;
 
 stop:
     // notify spectators
@@ -885,15 +920,14 @@ stop:
                             "[MVD] Streaming resumed.\n");
     }
     mvd->state = MVD_READING;
-    mvd->dirty = qtrue;
-    return qtrue;
+    mvd->dirty = true;
+    return true;
 }
 
 // ran out of buffers
 static void gtv_wait_start(mvd_t *mvd)
 {
     gtv_t *gtv = mvd->gtv;
-    int tr = mvd_wait_delay->value * 10;
 
     // if not connected, kill the channel
     if (!gtv) {
@@ -911,12 +945,10 @@ static void gtv_wait_start(mvd_t *mvd)
     // resume as quickly as possible after there is some
     // data available again
     mvd->min_packets = 50 + 5 * mvd->underflows;
-    if (mvd->min_packets > tr) {
-        mvd->min_packets = tr;
-    }
+    mvd->min_packets = min(mvd->min_packets, mvd_wait_delay->integer);
     mvd->underflows++;
     mvd->state = MVD_WAITING;
-    mvd->dirty = qtrue;
+    mvd->dirty = true;
 
     // notify spectators
     if (COM_DEDICATED) {
@@ -929,20 +961,20 @@ static void gtv_wait_start(mvd_t *mvd)
     NET_UpdateStream(&gtv->stream);
 }
 
-static qboolean gtv_read_frame(mvd_t *mvd)
+static bool gtv_read_frame(mvd_t *mvd)
 {
     uint16_t msglen;
 
     switch (mvd->state) {
     case MVD_WAITING:
         if (!gtv_wait_stop(mvd)) {
-            return qfalse;
+            return false;
         }
         break;
     case MVD_READING:
         if (!mvd->num_packets) {
             gtv_wait_start(mvd);
-            return qfalse;
+            return false;
         }
         break;
     default:
@@ -972,10 +1004,10 @@ static qboolean gtv_read_frame(mvd_t *mvd)
 
     // parse it
     MVD_ParseMessage(mvd);
-    return qtrue;
+    return true;
 }
 
-static qboolean gtv_forward_cmd(mvd_client_t *client)
+static bool gtv_forward_cmd(mvd_client_t *client)
 {
     mvd_t *mvd = client->mvd;
     gtv_t *gtv = mvd->gtv;
@@ -985,17 +1017,17 @@ static qboolean gtv_forward_cmd(mvd_client_t *client)
     if (!gtv || gtv->state < GTV_CONNECTED) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
                         "[MVD] Not connected to the game server.\n");
-        return qfalse;
+        return false;
     }
     if (!(gtv->flags & GTF_STRINGCMDS)) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
                         "[MVD] Game server does not allow command forwarding.\n");
-        return qfalse;
+        return false;
     }
     if (FIFO_Usage(&gtv->stream.send)) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
                         "[MVD] Send buffer not empty, please wait.\n");
-        return qfalse;
+        return false;
     }
 
     text = Cmd_Args();
@@ -1010,7 +1042,7 @@ static qboolean gtv_forward_cmd(mvd_client_t *client)
     write_message(gtv, GTC_STRINGCMD);
     SZ_Clear(&msg_write);
     NET_UpdateStream(&gtv->stream);
-    return qtrue;
+    return true;
 }
 
 static void send_hello(gtv_t *gtv)
@@ -1040,13 +1072,11 @@ static void send_stream_start(gtv_t *gtv)
     int maxbuf;
 
     if (gtv->mvd) {
-        maxbuf = gtv->mvd->min_packets / 2;
+        maxbuf = gtv->mvd->min_packets;
     } else {
-        maxbuf = mvd_wait_delay->value * 10 / 2;
+        maxbuf = mvd_wait_delay->integer;
     }
-    if (maxbuf < 10) {
-        maxbuf = 10;
-    }
+    maxbuf = max(maxbuf / 2, 10);
 
     // send stream start request
     MSG_WriteShort(maxbuf);
@@ -1105,7 +1135,7 @@ static void parse_hello(gtv_t *gtv)
             gtv->z_buf.data = MVD_Malloc(MAX_GTS_MSGLEN);
             gtv->z_buf.size = MAX_GTS_MSGLEN;
         }
-        gtv->z_act = qtrue; // remaining data is deflated
+        gtv->z_act = true; // remaining data is deflated
 #else
         gtv_destroyf(gtv, "Server sending deflated data");
 #endif
@@ -1185,7 +1215,7 @@ static void parse_stream_data(gtv_t *gtv)
     if (!mvd) {
         mvd = create_channel(gtv);
 
-        Cvar_ClampInteger(mvd_buffer_size, 2, 10);
+        Cvar_ClampInteger(mvd_buffer_size, 2, 256);
 
         // allocate delay buffer
         size = mvd_buffer_size->integer * MAX_MSGLEN;
@@ -1248,7 +1278,7 @@ static void parse_stream_data(gtv_t *gtv)
     }
 }
 
-static qboolean parse_message(gtv_t *gtv, fifo_t *fifo)
+static bool parse_message(gtv_t *gtv, fifo_t *fifo)
 {
     uint32_t magic;
     uint16_t msglen;
@@ -1257,7 +1287,7 @@ static qboolean parse_message(gtv_t *gtv, fifo_t *fifo)
     // check magic
     if (gtv->state < GTV_PREPARING) {
         if (!FIFO_TryRead(fifo, &magic, 4)) {
-            return qfalse;
+            return false;
         }
         if (magic != MVD_MAGIC) {
             gtv_destroyf(gtv, "Not a MVD/GTV stream");
@@ -1270,7 +1300,7 @@ static qboolean parse_message(gtv_t *gtv, fifo_t *fifo)
     // parse msglen
     if (!gtv->msglen) {
         if (!FIFO_TryRead(fifo, &msglen, 2)) {
-            return qfalse;
+            return false;
         }
         msglen = LittleShort(msglen);
         if (!msglen) {
@@ -1284,7 +1314,7 @@ static qboolean parse_message(gtv_t *gtv, fifo_t *fifo)
 
     // read this message
     if (!FIFO_ReadMessage(fifo, gtv->msglen)) {
-        return qfalse;
+        return false;
     }
 
     gtv->msglen = 0;
@@ -1332,7 +1362,7 @@ static qboolean parse_message(gtv_t *gtv, fifo_t *fifo)
     }
 
     gtv->last_rcvd = svs.realtime; // don't timeout
-    return qtrue;
+    return true;
 }
 
 #if USE_ZLIB
@@ -1376,10 +1406,10 @@ static void inflate_more(gtv_t *gtv)
         break;
     case Z_STREAM_END:
         inflateReset(&gtv->z_str);
-        gtv->z_act = qfalse;
+        gtv->z_act = false;
         break;
     default:
-        gtv_destroyf(gtv, "inflate() failed: %s", gtv->z_str.msg);
+        gtv_destroyf(gtv, "inflate() failed with error %d", ret);
     }
 }
 #endif
@@ -1418,7 +1448,7 @@ static neterr_t run_connect(gtv_t *gtv)
 static neterr_t run_stream(gtv_t *gtv)
 {
     neterr_t ret;
-#ifdef _DEBUG
+#if USE_DEBUG
     int count;
     size_t usage;
 #endif
@@ -1428,7 +1458,7 @@ static neterr_t run_stream(gtv_t *gtv)
         return ret;
     }
 
-#ifdef _DEBUG
+#if USE_DEBUG
     count = 0;
     usage = FIFO_Usage(&gtv->stream.recv);
 #endif
@@ -1443,23 +1473,23 @@ static neterr_t run_stream(gtv_t *gtv)
             if (!parse_message(gtv, &gtv->z_buf)) {
                 break;
             }
-#ifdef _DEBUG
+#if USE_DEBUG
             count++;
 #endif
         }
     } else
 #endif
         while (parse_message(gtv, &gtv->stream.recv)) {
-#ifdef _DEBUG
+#if USE_DEBUG
             count++;
 #endif
         }
 
-#ifdef _DEBUG
+#if USE_DEBUG
     if (mvd_shownet->integer == -1) {
         size_t total = usage - FIFO_Usage(&gtv->stream.recv);
 
-        Com_Printf("[%s] %"PRIz" bytes, %d msgs\n",
+        Com_Printf("[%s] %zu bytes, %d msgs\n",
                    gtv->name, total, count);
     }
 #endif
@@ -1469,10 +1499,8 @@ static neterr_t run_stream(gtv_t *gtv)
 
 static void check_timeouts(gtv_t *gtv)
 {
-    unsigned timeout = mvd_timeout->value * 1000;
-
     // drop if no data has been received for too long
-    if (svs.realtime - gtv->last_rcvd > timeout) {
+    if (svs.realtime - gtv->last_rcvd > mvd_timeout->integer) {
         gtv_dropf(gtv, "Server connection timed out.");
     }
 
@@ -1495,12 +1523,12 @@ static void check_timeouts(gtv_t *gtv)
     }
 }
 
-static qboolean check_reconnect(gtv_t *gtv)
+static bool check_reconnect(gtv_t *gtv)
 {
     netadr_t adr;
 
     if (svs.realtime - gtv->retry_time < gtv->retry_backoff) {
-        return qfalse;
+        return false;
     }
 
     Com_Printf("[%s] -=- Attempting to reconnect to %s...\n",
@@ -1512,15 +1540,15 @@ static qboolean check_reconnect(gtv_t *gtv)
     gtv->last_sent = gtv->last_rcvd = svs.realtime;
 
     if (!NET_StringToAdr(gtv->address, &adr, PORT_SERVER)) {
-        gtv_dropf(gtv, "Unable to lookup %s\n", gtv->address);
+        gtv_dropf(gtv, "Unable to lookup %s", gtv->address);
     }
 
-    if (NET_Connect(&adr, &gtv->stream) == NET_ERROR) {
-        gtv_dropf(gtv, "%s to %s\n", NET_ErrorString(),
+    if (NET_Connect(&adr, &gtv->stream)) {
+        gtv_dropf(gtv, "Unable to connect to %s",
                   NET_AdrToString(&adr));
     }
 
-    return qtrue;
+    return true;
 }
 
 static void gtv_run(gtv_t *gtv)
@@ -1542,7 +1570,7 @@ static void gtv_run(gtv_t *gtv)
             return;
         }
         if (ret == NET_OK) {
-        case NS_CONNECTED:
+    case NS_CONNECTED:
             ret = run_stream(gtv);
         }
         break;
@@ -1634,7 +1662,7 @@ static void gtv_drop(gtv_t *gtv)
 #if USE_ZLIB
     inflateReset(&gtv->z_str);
     FIFO_Clear(&gtv->z_buf);
-    gtv->z_act = qfalse;
+    gtv->z_act = false;
 #endif
     gtv->msglen = 0;
     gtv->state = GTV_DISCONNECTED;
@@ -1662,8 +1690,7 @@ void MVD_Spawn(void)
 #endif
 
     // generate spawncount for Waiting Room
-    sv.spawncount = (rand() | (rand() << 16)) ^ Sys_Milliseconds();
-    sv.spawncount &= 0x7FFFFFFF;
+    sv.spawncount = Q_rand() & 0x7fffffff;
 
 #if USE_FPS
     // just fixed base FPS
@@ -1710,7 +1737,6 @@ static void list_recordings(void)
 {
     mvd_t *mvd;
     char buffer[8];
-    off_t pos;
 
     Com_Printf(
         "id name         map      size name\n"
@@ -1718,8 +1744,7 @@ static void list_recordings(void)
 
     FOR_EACH_MVD(mvd) {
         if (mvd->demorecording) {
-            pos = FS_Tell(mvd->demorecording);
-            Com_FormatSize(buffer, sizeof(buffer), pos);
+            Com_FormatSize(buffer, sizeof(buffer), FS_Tell(mvd->demorecording));
         } else {
             strcpy(buffer, "-");
         }
@@ -1797,7 +1822,7 @@ void MVD_StreamedStop_f(void)
 
 static inline int player_flags(mvd_t *mvd, mvd_player_t *player)
 {
-    int flags = 0;
+    int flags = mvd->psFlags;
 
     if (!player->inuse)
         flags |= MSG_PS_REMOVE;
@@ -1807,7 +1832,7 @@ static inline int player_flags(mvd_t *mvd, mvd_player_t *player)
 
 static inline int entity_flags(mvd_t *mvd, edict_t *ent)
 {
-    int flags = MSG_ES_UMASK;
+    int flags = mvd->esFlags;
 
     if (!ent->inuse) {
         flags |= MSG_ES_REMOVE;
@@ -1842,12 +1867,12 @@ static void emit_base_frame(mvd_t *mvd)
     MSG_WriteByte(CLIENTNUM_NONE);
 
     // send base entity states
-    for (i = 1; i < MAX_EDICTS; i++) {
+    for (i = 1; i < mvd->csr->max_edicts; i++) {
         ent = &mvd->edicts[i];
         if (!(ent->svflags & SVF_MONSTER))
             continue;   // entity never seen
         ent->s.number = i;
-        MSG_PackEntity(&es, &ent->s, qfalse);
+        MSG_PackEntity(&es, &ent->s, &ent->x);
         MSG_WriteDeltaEntity(NULL, &es, entity_flags(mvd, ent));
     }
     MSG_WriteShort(0);
@@ -1865,27 +1890,23 @@ static void emit_gamestate(mvd_t *mvd)
     // send the serverdata
     MSG_WriteByte(mvd_serverdata | extra);
     MSG_WriteLong(PROTOCOL_VERSION_MVD);
-    MSG_WriteShort(PROTOCOL_VERSION_MVD_CURRENT);
+    MSG_WriteLong(mvd->version);
     MSG_WriteLong(mvd->servercount);
     MSG_WriteString(mvd->gamedir);
     MSG_WriteShort(mvd->clientNum);
 
     // send configstrings
-    for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
+    for (i = 0; i < mvd->csr->end; i++) {
         s = mvd->configstrings[i];
         if (!*s)
             continue;
 
-        len = strlen(s);
-        if (len > MAX_QPATH)
-            len = MAX_QPATH;
-
+        len = Q_strnlen(s, MAX_QPATH);
         MSG_WriteShort(i);
         MSG_WriteData(s, len);
         MSG_WriteByte(0);
     }
-
-    MSG_WriteShort(MAX_CONFIGSTRINGS);
+    MSG_WriteShort(i);
 
     // send baseline frame
     emit_base_frame(mvd);
@@ -1901,7 +1922,7 @@ void MVD_StreamedRecord_f(void)
     uint32_t magic;
     uint16_t msglen;
     unsigned mode = FS_MODE_WRITE;
-    ssize_t ret;
+    int ret;
     int c;
 
     while ((c = Cmd_ParseOptions(o_record)) != -1) {
@@ -2045,8 +2066,8 @@ static void MVD_Connect_f(void)
     }
 
     // create new socket and start connecting
-    if (NET_Connect(&adr, &stream) == NET_ERROR) {
-        Com_EPrintf("%s to %s\n", NET_ErrorString(),
+    if (NET_Connect(&adr, &stream)) {
+        Com_EPrintf("Unable to connect to %s\n",
                     NET_AdrToString(&adr));
         return;
     }
@@ -2077,11 +2098,51 @@ static void MVD_Connect_f(void)
                gtv->name, NET_AdrToString(&adr));
 }
 
+static const cmd_option_t o_mvdisconnect[] = {
+    { "a", "all", "destroy all connections" },
+    { "h", "help", "display this message" },
+    { NULL }
+};
+
+static void MVD_Disconnect_c(genctx_t *ctx, int argnum)
+{
+    Cmd_Option_c(o_mvdisconnect, NULL, ctx, argnum);
+}
+
 static void MVD_Disconnect_f(void)
 {
-    gtv_t *gtv;
+    gtv_t *gtv, *next;
+    bool all = false;
+    int c;
 
-    gtv = gtv_set_conn(1);
+    while ((c = Cmd_ParseOptions(o_mvdisconnect)) != -1) {
+        switch (c) {
+        case 'h':
+            Cmd_PrintUsage(o_mvdisconnect, "[conn_id]");
+            Com_Printf("Destroy specified MVD/GTV server connection.\n");
+            Cmd_PrintHelp(o_mvdisconnect);
+            return;
+        case 'a':
+            all = true;
+            break;
+        default:
+            return;
+        }
+    }
+
+    if (all) {
+        if (LIST_EMPTY(&mvd_gtv_list)) {
+            Com_Printf("No GTV connections.\n");
+            return;
+        }
+        LIST_FOR_EACH_SAFE(gtv_t, gtv, next, &mvd_gtv_list, entry) {
+            gtv->destroy(gtv);
+        }
+        Com_Printf("Destroyed all GTV connections.\n");
+        return;
+    }
+
+    gtv = gtv_set_conn(cmd_optind);
     if (!gtv) {
         return;
     }
@@ -2142,7 +2203,7 @@ static void MVD_Skip_f(void)
         return;
     }
 
-    count = atoi(Cmd_Argv(2));
+    count = Q_atoi(Cmd_Argv(2));
     if (count < 1) {
         count = 1;
     }
@@ -2159,14 +2220,16 @@ static void MVD_Seek_f(void)
 {
     mvd_t *mvd;
     gtv_t *gtv;
+    mvd_client_t *client;
     mvd_snap_t *snap;
-    int i, j, ret, index, frames, dest;
+    int i, j, ret, index, frames;
+    int64_t dest;
     char *from, *to;
     edict_t *ent;
-    qboolean gamestate;
+    bool gamestate, back_seek, byte_seek;
 
     if (Cmd_Argc() < 2) {
-        Com_Printf("Usage: %s [+-]<timespec> [chanid]\n", Cmd_Argv(0));
+        Com_Printf("Usage: %s [+-]<timespec|percent>[%%] [chanid]\n", Cmd_Argv(0));
         return;
     }
 
@@ -2189,56 +2252,79 @@ static void MVD_Seek_f(void)
 
     to = Cmd_Argv(1);
 
-    if (*to == '-' || *to == '+') {
-        // relative to current frame
-        if (!Com_ParseTimespec(to + 1, &frames)) {
-            Com_Printf("Invalid relative timespec.\n");
+    if (strchr(to, '%')) {
+        char *suf;
+        float percent = strtof(to, &suf);
+        if (suf == to || strcmp(suf, "%") || !isfinite(percent)) {
+            Com_Printf("[%s] Invalid percentage.\n", mvd->name);
             return;
         }
-        if (*to == '-')
-            frames = -frames;
-        dest = mvd->framenum + frames;
-    } else {
-        // relative to first frame
-        if (!Com_ParseTimespec(to, &dest)) {
-            Com_Printf("Invalid absolute timespec.\n");
-            return;
-        }
-        frames = dest - mvd->framenum;
-    }
 
-    if (!frames)
-        // already there
-        return;
+        if (!gtv->demosize) {
+            Com_Printf("[%s] Unknown file size, can't seek.\n", mvd->name);
+            return;
+        }
+
+        percent = Q_clipf(percent, 0, 100);
+        dest = gtv->demoofs + gtv->demosize * percent / 100;
+
+        byte_seek = true;
+        back_seek = dest < FS_Tell(gtv->demoplayback);
+    } else {
+        if (*to == '-' || *to == '+') {
+            // relative to current frame
+            if (!Com_ParseTimespec(to + 1, &frames)) {
+                Com_Printf("Invalid relative timespec.\n");
+                return;
+            }
+            if (*to == '-')
+                frames = -frames;
+            dest = mvd->framenum + frames;
+        } else {
+            // relative to first frame
+            if (!Com_ParseTimespec(to, &i)) {
+                Com_Printf("Invalid absolute timespec.\n");
+                return;
+            }
+            dest = i;
+            frames = i - mvd->framenum;
+        }
+
+        if (!frames)
+            return; // already there
+
+        byte_seek = false;
+        back_seek = frames < 0;
+    }
 
     if (setjmp(mvd_jmpbuf))
         return;
 
     // disable effects processing
-    mvd->demoseeking = qtrue;
+    mvd->demoseeking = true;
 
     // clear dirty configstrings
     memset(mvd->dcs, 0, sizeof(mvd->dcs));
 
-    Com_DPrintf("[%d] seeking to %d\n", mvd->framenum, dest);
+    Com_DPrintf("[%d] seeking to %"PRId64"\n", mvd->framenum, dest);
 
     // seek to the previous most recent snapshot
-    if (frames < 0 || mvd->last_snapshot > mvd->framenum) {
-        snap = demo_find_snapshot(mvd, dest);
+    if (back_seek || mvd->last_snapshot > mvd->framenum) {
+        snap = demo_find_snapshot(mvd, dest, byte_seek);
 
         if (snap) {
             Com_DPrintf("found snap at %d\n", snap->framenum);
-            ret = FS_Seek(gtv->demoplayback, snap->filepos);
+            ret = FS_Seek(gtv->demoplayback, snap->filepos, SEEK_SET);
             if (ret < 0) {
                 Com_EPrintf("[%s] Couldn't seek demo: %s\n", mvd->name, Q_ErrorString(ret));
                 goto done;
             }
 
             // clear delta state
-            MVD_ClearState(mvd, qfalse);
+            MVD_ClearState(mvd, false);
 
             // reset configstrings
-            for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
+            for (i = 0; i < mvd->csr->end; i++) {
                 from = mvd->baseconfigstrings[i];
                 to = mvd->configstrings[i];
 
@@ -2257,14 +2343,18 @@ static void MVD_Seek_f(void)
 
             MVD_ParseMessage(mvd);
             mvd->framenum = snap->framenum;
-        } else if (frames < 0) {
+        } else if (back_seek) {
             Com_Printf("[%s] Couldn't seek backwards without snapshots!\n", mvd->name);
             goto done;
         }
     }
 
-    // skip forward to destination frame
-    while (mvd->framenum < dest) {
+    // skip forward to destination frame/position
+    while (1) {
+        int64_t pos = byte_seek ? FS_Tell(gtv->demoplayback) : mvd->framenum;
+        if (pos >= dest)
+            break;
+
         ret = demo_read_message(gtv->demoplayback);
         if (ret <= 0) {
             demo_finish(gtv, ret);
@@ -2296,16 +2386,30 @@ static void MVD_Seek_f(void)
         }
     }
 
+    // write private configstrings
+    FOR_EACH_MVDCL(client, mvd) {
+        if (client->cl->state < cs_spawned)
+            continue;
+
+        if (client->target)
+            MVD_WriteStringList(client, client->target->configstrings);
+        else if (mvd->dummy)
+            MVD_WriteStringList(client, mvd->dummy->configstrings);
+
+        if (client->layout_type == LAYOUT_SCORES)
+            client->layout_time = 0;
+    }
+
     // ouch
     CM_SetPortalStates(&mvd->cm, NULL, 0);
 
     // init world entity
     ent = &mvd->edicts[0];
     ent->solid = SOLID_BSP;
-    ent->inuse = qtrue;
+    ent->inuse = true;
 
     // relink all seen entities, reset old origins and events
-    for (i = 1; i < MAX_EDICTS; i++) {
+    for (i = 1; i < mvd->csr->max_edicts; i++) {
         ent = &mvd->edicts[i];
 
         if (ent->svflags & SVF_MONSTER)
@@ -2324,12 +2428,12 @@ static void MVD_Seek_f(void)
 
     // wait one frame to give entity events a chance to be communicated back to
     // clients
-    gtv->demowait = qtrue;
+    gtv->demowait = true;
 
     demo_update(gtv);
 
 done:
-    mvd->demoseeking = qfalse;
+    mvd->demoseeking = false;
 }
 
 static void MVD_Control_f(void)
@@ -2354,7 +2458,7 @@ static void MVD_Control_f(void)
             Cmd_PrintHelp(options);
             return;
         case 'l':
-            loop = atoi(cmd_optarg);
+            loop = Q_atoi(cmd_optarg);
             if (loop < 0) {
                 Com_Printf("Invalid value for %s option.\n", cmd_optopt);
                 Cmd_PrintHint();
@@ -2435,7 +2539,7 @@ static void MVD_Play_f(void)
                        "Prepend slash to specify raw path.\n");
             return;
         case 'l':
-            loop = atoi(cmd_optarg);
+            loop = Q_atoi(cmd_optarg);
             if (loop < 0) {
                 Com_Printf("Invalid value for %s option.\n", cmd_optopt);
                 Cmd_PrintHint();
@@ -2477,7 +2581,7 @@ static void MVD_Play_f(void)
             continue;
         }
 
-        FS_FCloseFile(f);
+        FS_CloseFile(f);
 
         len = strlen(buffer);
         entry = MVD_Malloc(sizeof(*entry) + len);
@@ -2547,12 +2651,12 @@ void MVD_Shutdown(void)
     List_Init(&mvd_gtv_list);
     List_Init(&mvd_channel_list);
 
-    Z_Free(mvd_clients);
-    mvd_clients = NULL;
+    Z_Freep((void**)&mvd_clients);
+    Z_Freep((void**)&mvd_ge.edicts);
 
     mvd_chanid = 0;
 
-    mvd_active = qfalse;
+    mvd_active = false;
 
     Z_LeakTest(TAG_MVD);
 }
@@ -2560,7 +2664,7 @@ void MVD_Shutdown(void)
 static const cmdreg_t c_mvd[] = {
     { "mvdplay", MVD_Play_f, MVD_Play_c },
     { "mvdconnect", MVD_Connect_f, MVD_Connect_c },
-    { "mvdisconnect", MVD_Disconnect_f },
+    { "mvdisconnect", MVD_Disconnect_f, MVD_Disconnect_c },
     { "mvdkill", MVD_Kill_f },
     { "mvdspawn", MVD_Spawn_f },
     { "mvdchannels", MVD_ListChannels_f },
@@ -2573,6 +2677,10 @@ static const cmdreg_t c_mvd[] = {
     { NULL }
 };
 
+static void mvd_wait_delay_changed(cvar_t *self)
+{
+    self->integer = 10 * Cvar_ClampValue(self, 0, 60 * 60);
+}
 
 /*
 ==============
@@ -2581,14 +2689,20 @@ MVD_Register
 */
 void MVD_Register(void)
 {
-#ifdef _DEBUG
+#if USE_DEBUG
     mvd_shownet = Cvar_Get("mvd_shownet", "0", 0);
 #endif
     mvd_timeout = Cvar_Get("mvd_timeout", "90", 0);
+    mvd_timeout->changed = sv_sec_timeout_changed;
+    mvd_timeout->changed(mvd_timeout);
     mvd_suspend_time = Cvar_Get("mvd_suspend_time", "5", 0);
+    mvd_suspend_time->changed = sv_min_timeout_changed;
+    mvd_suspend_time->changed(mvd_suspend_time);
     mvd_wait_delay = Cvar_Get("mvd_wait_delay", "20", 0);
-    mvd_wait_percent = Cvar_Get("mvd_wait_percent", "35", 0);
-    mvd_buffer_size = Cvar_Get("mvd_buffer_size", "3", 0);
+    mvd_wait_delay->changed = mvd_wait_delay_changed;
+    mvd_wait_delay->changed(mvd_wait_delay);
+    mvd_wait_percent = Cvar_Get("mvd_wait_percent", "50", 0);
+    mvd_buffer_size = Cvar_Get("mvd_buffer_size", "8", 0);
     mvd_username = Cvar_Get("mvd_username", "unnamed", 0);
     mvd_password = Cvar_Get("mvd_password", "", CVAR_PRIVATE);
     mvd_snaps = Cvar_Get("mvd_snaps", "10", 0);

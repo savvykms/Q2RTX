@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "shared/shared.h"
+#include "common/common.h"
 #include "common/utils.h"
 
 /*
@@ -27,11 +28,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 ==============================================================================
 */
 
-static qboolean match_raw(int c1, int c2, qboolean ignorecase)
+static bool match_raw(int c1, int c2, bool ignorecase)
 {
     if (c1 != c2) {
         if (!ignorecase) {
-            return qfalse;
+            return false;
         }
 #ifdef _WIN32
         // ugly hack for file listing
@@ -42,26 +43,26 @@ static qboolean match_raw(int c1, int c2, qboolean ignorecase)
         c2 = Q_tolower(c2);
 #endif
         if (c1 != c2) {
-            return qfalse;
+            return false;
         }
     }
 
-    return qtrue;
+    return true;
 }
 
-static qboolean match_char(int c1, int c2, qboolean ignorecase)
+static bool match_char(int c1, int c2, bool ignorecase)
 {
     if (c1 == '?') {
-        return !!c2; // match any char except NUL
+        return c2; // match any char except NUL
     }
 
     return match_raw(c1, c2, ignorecase);
 }
 
-static qboolean match_part(const char *filter, const char *string,
-                           size_t len, qboolean ignorecase)
+static bool match_part(const char *filter, const char *string,
+                       size_t len, bool ignorecase)
 {
-    qboolean match;
+    bool match;
 
     do {
         // skip over escape character
@@ -73,19 +74,19 @@ static qboolean match_part(const char *filter, const char *string,
         }
 
         if (!match) {
-            return qfalse;
+            return false;
         }
 
         filter++;
         string++;
     } while (--len);
 
-    return qtrue;
+    return true;
 }
 
 // match the longest possible part
 static const char *match_filter(const char *filter, const char *string,
-                                size_t len, qboolean ignorecase)
+                                size_t len, bool ignorecase)
 {
     const char *ret = NULL;
     size_t remaining = strlen(string);
@@ -119,12 +120,12 @@ characters lose their meaning in this case.
 
 =================
 */
-qboolean Com_WildCmpEx(const char *filter, const char *string,
-                       int term, qboolean ignorecase)
+bool Com_WildCmpEx(const char *filter, const char *string,
+                   int term, bool ignorecase)
 {
     const char *sub;
     size_t len;
-    qboolean match;
+    bool match;
 
     while (*filter && *filter != term) {
         if (*filter == '*') {
@@ -146,12 +147,12 @@ qboolean Com_WildCmpEx(const char *filter, const char *string,
 
             // wildcard at the end matches everything
             if (!len) {
-                return qtrue;
+                return true;
             }
 
             string = match_filter(sub, string, len, ignorecase);
             if (!string) {
-                return qfalse;
+                return false;
             }
         } else {
             // skip over escape character
@@ -167,7 +168,7 @@ qboolean Com_WildCmpEx(const char *filter, const char *string,
 
             // match single character
             if (!match) {
-                return qfalse;
+                return false;
             }
 
             filter++;
@@ -187,7 +188,7 @@ qboolean Com_WildCmpEx(const char *filter, const char *string,
 ==============================================================================
 */
 
-const char *const colorNames[10] = {
+const char *const colorNames[COLOR_COUNT] = {
     "black", "red", "green", "yellow",
     "blue", "cyan", "magenta", "white",
     "alt", "none"
@@ -197,20 +198,23 @@ const char *const colorNames[10] = {
 ================
 Com_ParseColor
 
-Parses color name or index up to the maximum allowed index.
+Parses color name or index.
 Returns COLOR_NONE in case of error.
 ================
 */
-color_index_t Com_ParseColor(const char *s, color_index_t last)
+color_index_t Com_ParseColor(const char *s)
 {
     color_index_t i;
 
     if (COM_IsUint(s)) {
-        i = strtoul(s, NULL, 10);
-        return i > last ? COLOR_NONE : i;
+        i = Q_atoi(s);
+        if (i < 0 || i >= COLOR_COUNT) {
+            return COLOR_NONE;
+        }
+        return i;
     }
 
-    for (i = 0; i <= last; i++) {
+    for (i = 0; i < COLOR_COUNT; i++) {
         if (!strcmp(colorNames[i], s)) {
             return i;
         }
@@ -218,46 +222,6 @@ color_index_t Com_ParseColor(const char *s, color_index_t last)
 
     return COLOR_NONE;
 }
-
-#if REF_GL
-/*
-================
-Com_ParseExtensionString
-
-Helper function to parse an OpenGL-style extension string.
-================
-*/
-unsigned Com_ParseExtensionString(const char *s, const char *const extnames[])
-{
-    unsigned mask;
-    const char *p;
-    size_t l1, l2;
-    int i;
-
-    if (!s) {
-        return 0;
-    }
-
-    mask = 0;
-    while (*s) {
-        p = Q_strchrnul(s, ' ');
-        l1 = p - s;
-        for (i = 0; extnames[i]; i++) {
-            l2 = strlen(extnames[i]);
-            if (l1 == l2 && !memcmp(s, extnames[i], l1)) {
-                mask |= 1 << i;
-                break;
-            }
-        }
-        if (!*p) {
-            break;
-        }
-        s = p + 1;
-    }
-
-    return mask;
-}
-#endif
 
 /*
 ================
@@ -281,6 +245,24 @@ void Com_PlayerToEntityState(const player_state_t *ps, entity_state_t *es)
     es->angles[ROLL] = 0;
 }
 
+/*
+================
+Com_ParseMapName
+================
+*/
+bool Com_ParseMapName(char *out, const char *in, size_t size)
+{
+    if (Q_stricmpn(in, "maps/", 5))
+        return false;
+    in += 5;
+
+    char *ext = COM_FileExtension(in);
+    if (ext == in || Q_stricmp(ext, ".bsp"))
+        return false;
+
+    return COM_StripExtension(out, in, size) < size;
+}
+
 #if USE_CLIENT || USE_MVD_CLIENT
 /*
 ================
@@ -290,7 +272,7 @@ Parses time/frame specification for seeking in demos.
 Does not check for integer overflow...
 ================
 */
-qboolean Com_ParseTimespec(const char *s, int *frames)
+bool Com_ParseTimespec(const char *s, int *frames)
 {
     unsigned long c1, c2, c3;
     char *p;
@@ -298,36 +280,36 @@ qboolean Com_ParseTimespec(const char *s, int *frames)
     c1 = strtoul(s, &p, 10);
     if (!*p) {
         *frames = c1 * 10; // sec
-        return qtrue;
+        return true;
     }
 
     if (*p == '.') {
         c2 = strtoul(p + 1, &p, 10);
         if (*p)
-            return qfalse;
+            return false;
         *frames = c1 * 10 + c2; // sec.frac
-        return qtrue;
+        return true;
     }
 
     if (*p == ':') {
         c2 = strtoul(p + 1, &p, 10);
         if (!*p) {
             *frames = c1 * 600 + c2 * 10; // min:sec
-            return qtrue;
+            return true;
         }
 
         if (*p == '.') {
             c3 = strtoul(p + 1, &p, 10);
             if (*p)
-                return qfalse;
+                return false;
             *frames = c1 * 600 + c2 * 10 + c3; // min:sec.frac
-            return qtrue;
+            return true;
         }
 
-        return qfalse;
+        return false;
     }
 
-    return qfalse;
+    return false;
 }
 #endif
 
@@ -386,6 +368,38 @@ void Com_PageInMemory(void *buffer, size_t size)
 
     for (i = size - 1; i > 0; i -= 4096)
         paged_total += ((byte *)buffer)[i];
+}
+
+size_t Com_FormatLocalTime(char *buffer, size_t size, const char *fmt)
+{
+    static struct tm cached_tm;
+    static time_t cached_time;
+    time_t now;
+    struct tm *tm;
+    size_t ret;
+
+    if (!size)
+        return 0;
+
+    now = time(NULL);
+    if (now == cached_time) {
+        // avoid calling localtime() too often since it is not that cheap
+        tm = &cached_tm;
+    } else {
+        tm = localtime(&now);
+        if (!tm)
+            goto fail;
+        cached_time = now;
+        cached_tm = *tm;
+    }
+
+    ret = strftime(buffer, size, fmt, tm);
+    Q_assert(ret < size);
+    if (ret)
+        return ret;
+fail:
+    buffer[0] = 0;
+    return 0;
 }
 
 size_t Com_FormatTime(char *buffer, size_t size, time_t t)
@@ -462,39 +476,104 @@ size_t Com_TimeDiffLong(char *buffer, size_t size, time_t *p, time_t now)
     return Com_FormatTimeLong(buffer, size, diff);
 }
 
-size_t Com_FormatSize(char *dest, size_t destsize, off_t bytes)
+size_t Com_FormatSize(char *dest, size_t destsize, int64_t bytes)
 {
+    if (bytes >= 1000000000) {
+        return Q_scnprintf(dest, destsize, "%.1fG", bytes * 1e-9);
+    }
     if (bytes >= 10000000) {
-        return Q_scnprintf(dest, destsize, "%dM", (int)(bytes / 1000000));
+        return Q_scnprintf(dest, destsize, "%"PRId64"M", bytes / 1000000);
     }
     if (bytes >= 1000000) {
-        return Q_scnprintf(dest, destsize, "%.1fM", (float)bytes / 1000000);
+        return Q_scnprintf(dest, destsize, "%.1fM", bytes * 1e-6);
     }
     if (bytes >= 1000) {
-        return Q_scnprintf(dest, destsize, "%dK", (int)(bytes / 1000));
+        return Q_scnprintf(dest, destsize, "%"PRId64"K", bytes / 1000);
     }
     if (bytes >= 0) {
-        return Q_scnprintf(dest, destsize, "%d", (int)bytes);
+        return Q_scnprintf(dest, destsize, "%"PRId64, bytes);
     }
     return Q_scnprintf(dest, destsize, "???");
 }
 
-size_t Com_FormatSizeLong(char *dest, size_t destsize, off_t bytes)
+size_t Com_FormatSizeLong(char *dest, size_t destsize, int64_t bytes)
 {
+    if (bytes >= 1000000000) {
+        return Q_scnprintf(dest, destsize, "%.1f GB", bytes * 1e-9);
+    }
     if (bytes >= 10000000) {
-        return Q_scnprintf(dest, destsize, "%d MB", (int)(bytes / 1000000));
+        return Q_scnprintf(dest, destsize, "%"PRId64" MB", bytes / 1000000);
     }
     if (bytes >= 1000000) {
-        return Q_scnprintf(dest, destsize, "%.1f MB", (float)bytes / 1000000);
+        return Q_scnprintf(dest, destsize, "%.1f MB", bytes * 1e-6);
     }
     if (bytes >= 1000) {
-        return Q_scnprintf(dest, destsize, "%d kB", (int)(bytes / 1000));
+        return Q_scnprintf(dest, destsize, "%"PRId64" kB", bytes / 1000);
     }
     if (bytes >= 0) {
-        return Q_scnprintf(dest, destsize, "%d byte%s",
-                           (int)bytes, bytes == 1 ? "" : "s");
+        return Q_scnprintf(dest, destsize, "%"PRId64" byte%s",
+                           bytes, bytes == 1 ? "" : "s");
     }
     return Q_scnprintf(dest, destsize, "unknown size");
 }
 
+static int escape_char(int c)
+{
+    switch (c) {
+        case '\a': return 'a';
+        case '\b': return 'b';
+        case '\t': return 't';
+        case '\n': return 'n';
+        case '\v': return 'v';
+        case '\f': return 'f';
+        case '\r': return 'r';
+        case '\\': return '\\';
+        case '"': return '"';
+    }
+    return 0;
+}
 
+const char com_hexchars[16] = "0123456789ABCDEF";
+
+size_t Com_EscapeString(char *dst, const char *src, size_t size)
+{
+    char *p, *end;
+
+    if (!size)
+        return 0;
+
+    p = dst;
+    end = dst + size;
+    while (*src) {
+        byte c = *src++;
+        int e = escape_char(c);
+
+        if (e) {
+            if (end - p <= 2)
+                break;
+            *p++ = '\\';
+            *p++ = e;
+        } else if (Q_isprint(c)) {
+            if (end - p <= 1)
+                break;
+            *p++ = c;
+        } else {
+            if (end - p <= 4)
+                break;
+            *p++ = '\\';
+            *p++ = 'x';
+            *p++ = com_hexchars[c >> 4];
+            *p++ = com_hexchars[c & 15];
+        }
+    }
+
+    *p = 0;
+    return p - dst;
+}
+
+char *Com_MakePrintable(const char *s)
+{
+    static char buffer[4096];
+    Com_EscapeString(buffer, s, sizeof(buffer));
+    return buffer;
+}

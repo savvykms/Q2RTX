@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef KEYS_H
-#define KEYS_H
+#pragma once
 
 //
 // these are the key numbers that should be passed to Key_Event
@@ -115,20 +114,21 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 typedef enum keydest_e {
     KEY_GAME    = 0,
-    KEY_CONSOLE = (1 << 0),
-    KEY_MESSAGE = (1 << 1),
-    KEY_MENU    = (1 << 2)
+    KEY_CONSOLE = BIT(0),
+    KEY_MESSAGE = BIT(1),
+    KEY_MENU    = BIT(2)
 } keydest_t;
 
-typedef qboolean (*keywaitcb_t)(void *arg, int key);
+typedef bool (*keywaitcb_t)(void *arg, int key);
 
 void    Key_Init(void);
 
-void    Key_Event(unsigned key, qboolean down, unsigned time);
+void    Key_Event(unsigned key, bool down, unsigned time);
+void    Key_Event2(unsigned key, bool down, unsigned time);
 void    Key_CharEvent(int key);
 
-qboolean    Key_GetOverstrikeMode(void);
-void        Key_SetOverstrikeMode(qboolean overstrike);
+bool        Key_GetOverstrikeMode(void);
+void        Key_SetOverstrikeMode(bool overstrike);
 keydest_t   Key_GetDest(void);
 void        Key_SetDest(keydest_t dest);
 
@@ -136,14 +136,12 @@ int         Key_IsDown(int key);
 int         Key_AnyKeyDown(void);
 void        Key_ClearStates(void);
 
-char    *Key_KeynumToString(int keynum);
+const char  *Key_KeynumToString(int keynum);
 int     Key_StringToKeynum(const char *str);
 void    Key_SetBinding(int keynum, const char *binding);
-char    *Key_GetBinding(const char *binding);
-char    *Key_GetBindingForKey(int keynum);
+const char    *Key_GetBinding(const char *binding);
+const char    *Key_GetBindingForKey(int keynum);
 int     Key_EnumBindings(int key, const char *binding);
 void    Key_WriteBindings(qhandle_t f);
 
 void    Key_WaitKey(keywaitcb_t wait, void *arg);
-
-#endif // KEYS_H

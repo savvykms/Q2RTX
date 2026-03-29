@@ -18,33 +18,55 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "server.h"
 
-#define SAVE_MAGIC1     (('2'<<24)|('V'<<16)|('S'<<8)|'S')  // "SSV2"
-#define SAVE_MAGIC2     (('2'<<24)|('V'<<16)|('A'<<8)|'S')  // "SAV2"
+#define SAVE_MAGIC1     MakeLittleLong('S','S','V','2')
+#define SAVE_MAGIC2     MakeLittleLong('S','A','V','2')
 #define SAVE_VERSION    1
 
 #define SAVE_CURRENT    ".current"
 #define SAVE_AUTO       "save0"
 
 cvar_t *sv_savedir = NULL;
+/* Don't require GMF_ENHANCED_SAVEGAMES feature for savegame support.
+ * Savegame logic may be less "safe", but in practice, this usually works fine.
+ * Still, allow it as an option for cautious people. */
+cvar_t *sv_force_enhanced_savegames = NULL;
+static cvar_t   *sv_noreload;
 
+static int write_binary_file(char const* name, void const* data, size_t size)
+{
+    char namecopy[MAX_OSPATH];
+    if (Q_strlcpy(namecopy, name, MAX_OSPATH) >= MAX_OSPATH)
+        return -1;
 
-static int write_server_file(qboolean autosave)
+    if (FS_CreatePath(namecopy) < 0)
+        return -1;
+
+    FILE* fp = fopen(name, "wb");
+    if (!fp)
+        return -1;
+
+    if (fwrite(data, 1, size, fp) < size)
+    {
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int write_server_file(bool autosave)
 {
     char        name[MAX_OSPATH];
     cvar_t      *var;
-    size_t      len;
-    qerror_t    ret;
-    uint64_t    timestamp;
+    int         ret;
 
     // write magic
     MSG_WriteLong(SAVE_MAGIC1);
     MSG_WriteLong(SAVE_VERSION);
 
-    timestamp = (uint64_t)time(NULL);
-
     // write the comment field
-    MSG_WriteLong(timestamp & 0xffffffff);
-    MSG_WriteLong(timestamp >> 32);
+    MSG_WriteLong64(time(NULL));
     MSG_WriteByte(autosave);
     MSG_WriteString(sv.configstrings[CS_NAME]);
 
@@ -64,8 +86,10 @@ static int write_server_file(qboolean autosave)
     MSG_WriteString(NULL);
 
     // write server state
-	Q_snprintf(name, MAX_OSPATH, "%s/%s/server.ssv", sv_savedir->string, SAVE_CURRENT);
-    ret = FS_WriteFile(name, msg_write.data, msg_write.cursize);
+	if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/server.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT) >= MAX_OSPATH)
+        return -1;
+
+    ret = write_binary_file(name, msg_write.data, msg_write.cursize);
 
     SZ_Clear(&msg_write);
 
@@ -73,9 +97,7 @@ static int write_server_file(qboolean autosave)
         return -1;
 
     // write game state
-    len = Q_snprintf(name, MAX_OSPATH,
-                     "%s/%s/%s/game.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/game.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT) >= MAX_OSPATH)
         return -1;
 
     ge->WriteGame(name, autosave);
@@ -85,41 +107,36 @@ static int write_server_file(qboolean autosave)
 static int write_level_file(void)
 {
     char        name[MAX_OSPATH];
-    int         i;
+    int         i, ret;
     char        *s;
     size_t      len;
     byte        portalbits[MAX_MAP_PORTAL_BYTES];
-    qerror_t    ret;
 
     // write magic
     MSG_WriteLong(SAVE_MAGIC2);
     MSG_WriteLong(SAVE_VERSION);
 
     // write configstrings
-    for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
+    for (i = 0; i < svs.csr.end; i++) {
         s = sv.configstrings[i];
         if (!s[0])
             continue;
 
-        len = strlen(s);
-        if (len > MAX_QPATH)
-            len = MAX_QPATH;
-
+        len = Q_strnlen(s, MAX_QPATH);
         MSG_WriteShort(i);
         MSG_WriteData(s, len);
         MSG_WriteByte(0);
     }
-    MSG_WriteShort(MAX_CONFIGSTRINGS);
+    MSG_WriteShort(i);
 
     len = CM_WritePortalBits(&sv.cm, portalbits);
     MSG_WriteByte(len);
     MSG_WriteData(portalbits, len);
 
-    len = Q_snprintf(name, MAX_QPATH, "%s/%s/%s.sv2", sv_savedir->string, SAVE_CURRENT, sv.name);
-    if (len >= MAX_QPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/%s.sv2", fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name) >= MAX_OSPATH)
         ret = -1;
     else
-        ret = FS_WriteFile(name, msg_write.data, msg_write.cursize);
+        ret = write_binary_file(name, msg_write.data, msg_write.cursize);
 
     SZ_Clear(&msg_write);
 
@@ -127,9 +144,7 @@ static int write_level_file(void)
         return -1;
 
     // write game level
-    len = Q_snprintf(name, MAX_OSPATH,
-                     "%s/%s/%s/%s.sav", fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/%s.sav", fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name) >= MAX_OSPATH)
         return -1;
 
     ge->WriteLevel(name);
@@ -144,16 +159,14 @@ static int copy_file(const char *src, const char *dst, const char *name)
     size_t  len, res;
     int     ret = -1;
 
-    len = Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, src, name);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, src, name) >= MAX_OSPATH)
         goto fail0;
 
     ifp = fopen(path, "rb");
     if (!ifp)
         goto fail0;
 
-    len = Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, dst, name);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, dst, name) >= MAX_OSPATH)
         goto fail1;
 
     if (FS_CreatePath(path))
@@ -176,9 +189,9 @@ static int copy_file(const char *src, const char *dst, const char *name)
 
     ret = 0;
 fail2:
-    fclose(ofp);
+    ret |= fclose(ofp);
 fail1:
-    fclose(ifp);
+    ret |= fclose(ifp);
 fail0:
     return ret;
 }
@@ -186,10 +199,8 @@ fail0:
 static int remove_file(const char *dir, const char *name)
 {
     char path[MAX_OSPATH];
-    size_t len;
 
-    len = Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, dir, name);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(path, MAX_OSPATH, "%s/%s/%s/%s", fs_gamedir, sv_savedir->string, dir, name) >= MAX_OSPATH)
         return -1;
 
     return remove(path);
@@ -197,8 +208,24 @@ static int remove_file(const char *dir, const char *name)
 
 static void **list_save_dir(const char *dir, int *count)
 {
-    return FS_ListFiles(va("%s/%s", sv_savedir->string, dir), ".ssv;.sav;.sv2",
-        FS_TYPE_REAL | FS_PATH_GAME, count);
+    char path[MAX_OSPATH];
+    listfiles_t list;
+
+    *count = 0;
+    
+    if (Q_snprintf(path, MAX_OSPATH, "%s/%s/%s", fs_gamedir, sv_savedir->string, dir) >= MAX_OSPATH)
+        return NULL;
+
+    memset(&list, 0, sizeof(list));
+    list.filter = ".ssv;.sav;.sv2";
+    list.flags = FS_SEARCH_RECURSIVE;
+    Sys_ListFiles_r(&list, path, 0);
+
+    list.files = FS_ReallocList(list.files, list.count + 1);
+    list.files[list.count] = NULL;
+
+    *count = list.count;
+    return list.files;
 }
 
 static int wipe_save_dir(const char *dir)
@@ -231,43 +258,58 @@ static int copy_save_dir(const char *src, const char *dst)
     return ret;
 }
 
+static bool file_exists(const char* name)
+{
+    FILE* fp = fopen(name, "rb");
+    if (!fp)
+        return false;
+
+    fclose(fp);
+    return true;
+}
+
 static int read_binary_file(const char *name)
 {
-    qhandle_t f;
-    size_t len;
-
-    len = FS_FOpenFile(name, &f, FS_MODE_READ | FS_TYPE_REAL | FS_PATH_GAME);
-    if (!f)
+    FILE* fp = fopen(name, "rb");
+    if (!fp)
         return -1;
+
+    int fd = os_fileno(fp);
+    if (fd == -1)
+        return -1;
+
+    Q_STATBUF st;
+    os_fstat(fd, &st);
+    
+    int64_t len = st.st_size;
 
     if (len > MAX_MSGLEN)
         goto fail;
 
-    if (FS_Read(msg_read_buffer, len, f) != len)
+    if (fread(msg_read_buffer, 1, len, fp) != len)
         goto fail;
 
-    SZ_Init(&msg_read, msg_read_buffer, len);
+    SZ_Init(&msg_read, msg_read_buffer, sizeof(msg_read_buffer));
     msg_read.cursize = len;
 
-    FS_FCloseFile(f);
+    fclose(fp);
     return 0;
 
 fail:
-    FS_FCloseFile(f);
+    fclose(fp);
     return -1;
 }
 
 char *SV_GetSaveInfo(const char *dir)
 {
-    char        name[MAX_QPATH], date[MAX_QPATH];
+    char        name[MAX_OSPATH], date[MAX_QPATH];
     size_t      len;
-    uint64_t    timestamp;
+    int64_t     timestamp;
     int         autosave, year;
     time_t      t;
     struct tm   *tm;
 
-    len = Q_snprintf(name, MAX_QPATH, "%s/%s/server.ssv", sv_savedir->string, dir);
-    if (len >= MAX_QPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/server.ssv", fs_gamedir, sv_savedir->string, dir) >= MAX_OSPATH)
         return NULL;
 
     if (read_binary_file(name))
@@ -280,8 +322,7 @@ char *SV_GetSaveInfo(const char *dir)
         return NULL;
 
     // read the comment field
-    timestamp = (uint64_t)MSG_ReadLong();
-    timestamp |= (uint64_t)MSG_ReadLong() << 32;
+    timestamp = MSG_ReadLong64();
     autosave = MSG_ReadByte();
     MSG_ReadString(name, sizeof(name));
 
@@ -294,13 +335,15 @@ char *SV_GetSaveInfo(const char *dir)
     year = tm ? tm->tm_year : -1;
 
     // format savegame date
-    t = (time_t)timestamp;
+    t = timestamp;
     len = 0;
     if ((tm = localtime(&t)) != NULL) {
         if (tm->tm_year == year)
             len = strftime(date, sizeof(date), "%b %d %H:%M", tm);
         else
             len = strftime(date, sizeof(date), "%b %d  %Y", tm);
+    } else {
+        len = strftime(date, sizeof(date), "%b %d  %Y", tm);
     }
     if (!len)
         strcpy(date, "???");
@@ -317,12 +360,13 @@ static int read_server_file(void)
 {
     char        name[MAX_OSPATH], string[MAX_STRING_CHARS];
     mapcmd_t    cmd;
-    size_t      len;
 
     // errors like missing file, bad version, etc are
     // non-fatal and just return to the command handler
 
-	Q_snprintf(name, MAX_OSPATH, "%s/%s/server.ssv", sv_savedir->string, SAVE_CURRENT);
+	if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/server.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT) >= MAX_OSPATH)
+        return -1;
+        
     if (read_binary_file(name))
         return -1;
 
@@ -335,8 +379,7 @@ static int read_server_file(void)
     memset(&cmd, 0, sizeof(cmd));
 
     // read the comment field
-    MSG_ReadLong();
-    MSG_ReadLong();
+    MSG_ReadLong64();
     if (MSG_ReadByte())
         cmd.loadgame = 2;   // autosave
     else
@@ -344,8 +387,7 @@ static int read_server_file(void)
     MSG_ReadString(NULL, 0);
 
     // read the mapcmd
-    len = MSG_ReadString(cmd.buffer, sizeof(cmd.buffer));
-    if (len >= sizeof(cmd.buffer))
+    if (MSG_ReadString(cmd.buffer, sizeof(cmd.buffer)) >= sizeof(cmd.buffer))
         return -1;
 
     // now try to load the map
@@ -359,19 +401,17 @@ static int read_server_file(void)
     SV_Shutdown("Server restarted\n", ERR_RECONNECT);
 
     // the rest can't underflow
-    msg_read.allowunderflow = qfalse;
+    msg_read.allowunderflow = false;
 
     // read all CVAR_LATCH cvars
     // these will be things like coop, skill, deathmatch, etc
     while (1) {
-        len = MSG_ReadString(name, MAX_QPATH);
-        if (!len)
-            break;
-        if (len >= MAX_QPATH)
+        if (MSG_ReadString(name, MAX_QPATH) >= MAX_QPATH)
             Com_Error(ERR_DROP, "Savegame cvar name too long");
+        if (!name[0])
+            break;
 
-        len = MSG_ReadString(string, sizeof(string));
-        if (len >= sizeof(string))
+        if (MSG_ReadString(string, sizeof(string)) >= sizeof(string))
             Com_Error(ERR_DROP, "Savegame cvar value too long");
 
         Cvar_UserSet(name, string);
@@ -381,13 +421,12 @@ static int read_server_file(void)
     SV_InitGame(MVD_SPAWN_DISABLED);
 
     // error out immediately if game doesn't support safe savegames
-    if (!(g_features->integer & GMF_ENHANCED_SAVEGAMES))
+    if (sv_force_enhanced_savegames->integer && !(g_features->integer & GMF_ENHANCED_SAVEGAMES))
         Com_Error(ERR_DROP, "Game does not support enhanced savegames");
 
     // read game state
-    len = Q_snprintf(name, MAX_OSPATH,
-                     "%s/%s/%s/game.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(name, MAX_OSPATH,
+                   "%s/%s/%s/game.ssv", fs_gamedir, sv_savedir->string, SAVE_CURRENT) >= MAX_OSPATH)
         Com_Error(ERR_DROP, "Savegame path too long");
 
     ge->ReadGame(name);
@@ -406,8 +445,8 @@ static int read_level_file(void)
     size_t  len, maxlen;
     int     index;
 
-    len = Q_snprintf(name, MAX_QPATH, "%s/%s/%s.sv2", sv_savedir->string, SAVE_CURRENT, sv.name);
-    if (len >= MAX_QPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/%s.sv2",
+                   fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name) >= MAX_OSPATH)
         return -1;
 
     if (read_binary_file(name))
@@ -422,56 +461,48 @@ static int read_level_file(void)
     // any error will drop from this point
 
     // the rest can't underflow
-    msg_read.allowunderflow = qfalse;
+    msg_read.allowunderflow = false;
 
     // read all configstrings
     while (1) {
-        index = MSG_ReadShort();
-        if (index == MAX_CONFIGSTRINGS)
+        index = MSG_ReadWord();
+        if (index == svs.csr.end)
             break;
 
-        if (index < 0 || index > MAX_CONFIGSTRINGS)
+        if (index < 0 || index >= svs.csr.end)
             Com_Error(ERR_DROP, "Bad savegame configstring index");
 
-        maxlen = CS_SIZE(index);
-        len = MSG_ReadString(sv.configstrings[index], maxlen);
-        if (len >= maxlen)
+        maxlen = CS_SIZE(&svs.csr, index);
+        if (MSG_ReadString(sv.configstrings[index], maxlen) >= maxlen)
             Com_Error(ERR_DROP, "Savegame configstring too long");
     }
 
-    len = MSG_ReadByte();
-    if (len > MAX_MAP_PORTAL_BYTES)
-        Com_Error(ERR_DROP, "Savegame portalbits too long");
-
     SV_ClearWorld();
 
+    len = MSG_ReadByte();
     CM_SetPortalStates(&sv.cm, MSG_ReadData(len), len);
 
     // read game level
-    len = Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/%s.sav",
-                     fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name);
-    if (len >= MAX_OSPATH)
+    if (Q_snprintf(name, MAX_OSPATH, "%s/%s/%s/%s.sav",
+                   fs_gamedir, sv_savedir->string, SAVE_CURRENT, sv.name) >= MAX_OSPATH)
         Com_Error(ERR_DROP, "Savegame path too long");
 
     ge->ReadLevel(name);
     return 0;
 }
 
-int SV_NoSaveGames(void)
+bool SV_NoSaveGames(void)
 {
-	if (dedicated->integer && !Cvar_VariableInteger("coop"))
-        return 1;
-
-    if (!(g_features->integer & GMF_ENHANCED_SAVEGAMES))
-        return 1;
+    if (sv_force_enhanced_savegames->integer && !(g_features->integer & GMF_ENHANCED_SAVEGAMES))
+        return true;
 
     if (Cvar_VariableInteger("deathmatch"))
-        return 1;
+        return true;
 
-    return 0;
+    return false;
 }
 
-void SV_AutoSaveBegin(mapcmd_t *cmd)
+void SV_AutoSaveBegin(const mapcmd_t *cmd)
 {
     byte        bitmap[MAX_CLIENTS / CHAR_BIT];
     edict_t     *ent;
@@ -498,7 +529,7 @@ void SV_AutoSaveBegin(mapcmd_t *cmd)
         ent = EDICT_NUM(i + 1);
         if (ent->inuse) {
             Q_SetBit(bitmap, i);
-            ent->inuse = qfalse;
+            ent->inuse = false;
         }
     }
 
@@ -515,11 +546,11 @@ void SV_AutoSaveBegin(mapcmd_t *cmd)
 
 void SV_AutoSaveEnd(void)
 {
-    if (sv.state != ss_game)
-        return;
+	if (sv.state != ss_game)
+		return;
 
-    if (SV_NoSaveGames())
-        return;
+	if (SV_NoSaveGames())
+		return;
 
 	// save the map just entered to include the player position (client edict shell)
 	if (write_level_file())
@@ -529,7 +560,7 @@ void SV_AutoSaveEnd(void)
 	}
 
     // save server state
-    if (write_server_file(qtrue)) {
+    if (write_server_file(true)) {
         Com_EPrintf("Couldn't write server file.\n");
         return;
     }
@@ -547,9 +578,11 @@ void SV_AutoSaveEnd(void)
     }
 }
 
-void SV_CheckForSavegame(mapcmd_t *cmd)
+void SV_CheckForSavegame(const mapcmd_t *cmd)
 {
     if (SV_NoSaveGames())
+        return;
+    if (sv_noreload->integer)
         return;
 
     if (read_level_file()) {
@@ -574,11 +607,52 @@ void SV_CheckForSavegame(mapcmd_t *cmd)
     }
 }
 
+void SV_CheckForEnhancedSavegames(void)
+{
+    if (Cvar_VariableInteger("deathmatch"))
+        return;
+
+    if (g_features->integer & GMF_ENHANCED_SAVEGAMES) {
+        Com_Printf("Game supports Q2PRO enhanced savegames.\n");
+        return;
+    }
+
+    if (sv.gamedetecthack == 4) {
+        Com_Printf("Game supports YQ2 enhanced savegames.\n");
+        Cvar_SetInteger(g_features, g_features->integer | GMF_ENHANCED_SAVEGAMES, FROM_CODE);
+        return;
+    }
+
+    Com_WPrintf("Game does not support enhanced savegames. Savegames will not work.\n");
+}
+
 static void SV_Savegame_c(genctx_t *ctx, int argnum)
 {
-    if (argnum == 1) {
-        FS_File_g("save", NULL, FS_SEARCH_DIRSONLY | FS_TYPE_REAL | FS_PATH_GAME, ctx);
+    if (argnum != 1)
+        return;
+
+    char path[MAX_OSPATH];
+    if (Q_snprintf(path, MAX_OSPATH, "%s/%s", fs_gamedir, sv_savedir->string) >= MAX_OSPATH)
+        return;
+
+    // Search for all directories in the savedir
+    listfiles_t list;
+    memset(&list, 0, sizeof(list));
+    list.flags = FS_SEARCH_DIRSONLY;
+    Sys_ListFiles_r(&list, path, 0);
+
+    // Same logic as in FS_File_g, copying the file names into the match context
+    for (int i = 0; i < list.count; i++) {
+        char* s = list.files[i];
+        if (ctx->count < ctx->size && !strncmp(s, ctx->partial, ctx->length)) {
+            ctx->matches = Z_Realloc(ctx->matches, ALIGN(ctx->count + 1, MIN_MATCHES) * sizeof(char *));
+            ctx->matches[ctx->count++] = s;
+        } else {
+            Z_Free(s);
+        }
     }
+
+    Z_Free(list.files);
 }
 
 static void SV_Loadgame_f(void)
@@ -590,11 +664,6 @@ static void SV_Loadgame_f(void)
         return;
     }
 
-    if (dedicated->integer) {
-        Com_Printf("Savegames are for listen servers only.\n");
-        return;
-    }
-
     dir = Cmd_Argv(1);
     if (!COM_IsPath(dir)) {
         Com_Printf("Bad savedir.\n");
@@ -602,9 +671,9 @@ static void SV_Loadgame_f(void)
     }
 
     // make sure the server files exist
-    if (!FS_FileExistsEx(va("%s/%s/server.ssv", sv_savedir->string, dir), FS_TYPE_REAL | FS_PATH_GAME) ||
-        !FS_FileExistsEx(va("%s/%s/game.ssv", sv_savedir->string, dir), FS_TYPE_REAL | FS_PATH_GAME)) {
-        Com_Printf ("No such savegame: %s\n", dir);
+    if (!file_exists(va("%s/%s/%s/server.ssv", fs_gamedir, sv_savedir->string, dir)) ||
+        !file_exists(va("%s/%s/%s/game.ssv", fs_gamedir, sv_savedir->string, dir))) {
+        Com_Printf("No such savegame: %s\n", dir);
         return;
     }
 
@@ -636,13 +705,8 @@ static void SV_Savegame_f(void)
         return;
     }
 
-    if (dedicated->integer) {
-        Com_Printf("Savegames are for listen servers only.\n");
-        return;
-    }
-
     // don't bother saving if we can't read them back!
-    if (!(g_features->integer & GMF_ENHANCED_SAVEGAMES)) {
+    if (sv_force_enhanced_savegames->integer && !(g_features->integer & GMF_ENHANCED_SAVEGAMES)) {
         Com_Printf("Game does not support enhanced savegames.\n");
         return;
     }
@@ -677,7 +741,7 @@ static void SV_Savegame_f(void)
     }
 
     // save server state
-    if (write_server_file(qfalse)) {
+    if (write_server_file(false)) {
         Com_Printf("Couldn't write server file.\n");
         return;
     }
@@ -705,6 +769,9 @@ static const cmdreg_t c_savegames[] = {
 
 void SV_RegisterSavegames(void)
 {
+    sv_noreload = Cvar_Get("sv_noreload", "0", 0);
+
     Cmd_Register(c_savegames);
 	sv_savedir = Cvar_Get("sv_savedir", "save", 0);
+	sv_force_enhanced_savegames = Cvar_Get("sv_force_enhanced_savegames", "0", 0);
 }

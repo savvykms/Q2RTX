@@ -23,6 +23,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "shared/shared.h"
 
+#include "common/async.h"
 #include "common/bsp.h"
 #include "common/cmd.h"
 #include "common/cmodel.h"
@@ -35,20 +36,24 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/math.h"
 #include "common/mdfour.h"
 #include "common/msg.h"
-#include "common/net/net.h"
 #include "common/net/chan.h"
+#include "common/net/net.h"
 #include "common/pmove.h"
 #include "common/prompt.h"
 #include "common/protocol.h"
 #include "common/tests.h"
 #include "common/utils.h"
-#include "common/x86/fpu.h"
 #include "common/zone.h"
 
 #include "client/client.h"
 #include "client/keys.h"
 #include "server/server.h"
 #include "system/system.h"
+#include "system/hunk.h"
+
+#if USE_DEBUG
+#include "features.h"
+#endif
 
 #include <setjmp.h>
 
@@ -61,20 +66,23 @@ static jmp_buf  com_abortframe;    // an ERR_DROP occured, exit the entire frame
 static void     (*com_abort_func)(void *);
 static void     *com_abort_arg;
 
-static qboolean com_errorEntered;
+static bool     com_errorEntered;
 static char     com_errorMsg[MAXERRORMSG]; // from Com_Printf/Com_Error
 
 static int      com_printEntered;
 
 static qhandle_t    com_logFile;
-static qboolean     com_logNewline;
+static bool         com_logNewline;
+static bool         com_conNewline;
 
 static char     **com_argv;
 static int      com_argc;
 
+#if USE_TESTS
 cvar_t  *z_perturb;
+#endif
 
-#ifdef _DEBUG
+#if USE_DEBUG
 cvar_t  *developer;
 #endif
 cvar_t  *timescale;
@@ -87,6 +95,7 @@ cvar_t  *logfile_enable;    // 1 = create new, 2 = append to existing
 cvar_t  *logfile_flush;     // 1 = flush after each print
 cvar_t  *logfile_name;
 cvar_t  *logfile_prefix;
+cvar_t  *console_prefix;
 
 #if USE_CLIENT
 cvar_t  *cl_running;
@@ -97,7 +106,7 @@ cvar_t  *sv_paused;
 cvar_t  *com_timedemo;
 cvar_t  *com_date_format;
 cvar_t  *com_time_format;
-#ifdef _DEBUG
+#if USE_DEBUG
 cvar_t  *com_debug_break;
 #endif
 cvar_t  *com_fatal_error;
@@ -121,7 +130,7 @@ const char  com_version_string[] =
 unsigned    com_framenum;
 unsigned    com_eventTime;
 unsigned    com_localTime;
-qboolean    com_initialized;
+bool        com_initialized;
 time_t      com_startTime;
 
 #if USE_CLIENT
@@ -197,6 +206,7 @@ static void Com_Redirect(const char *msg, size_t total)
         }
         memcpy(rd_buffer + rd_length, msg, length);
         rd_length += length;
+        msg += length;
         total -= length;
     }
 }
@@ -209,7 +219,7 @@ static void logfile_close(void)
 
     Com_Printf("Closing console log.\n");
 
-    FS_FCloseFile(com_logFile);
+    FS_CloseFile(com_logFile);
     com_logFile = 0;
 }
 
@@ -236,7 +246,7 @@ static void logfile_open(void)
     }
 
     com_logFile = f;
-    com_logNewline = qtrue;
+    com_logNewline = false;
     Com_Printf("Logging console to %s\n", buffer);
 }
 
@@ -256,101 +266,90 @@ static void logfile_param_changed(cvar_t *self)
     }
 }
 
-static size_t format_local_time(char *buffer, size_t size, const char *fmt)
+static size_t prefix_lines(char *buf, size_t size, const char *text, const char *prefix, bool *state)
 {
-    static struct tm cached_tm;
-    static time_t cached_time;
-    time_t now;
-    struct tm *tm;
-
-    if (!size) {
-        return 0;
-    }
-
-    buffer[0] = 0;
-
-    now = time(NULL);
-    if (now == cached_time) {
-        // avoid calling localtime() too often since it is not that cheap
-        tm = &cached_tm;
-    } else {
-        tm = localtime(&now);
-        if (!tm) {
-            return 0;
-        }
-        cached_time = now;
-        cached_tm = *tm;
-    }
-
-    return strftime(buffer, size, fmt, tm);
-}
-
-static void logfile_write(print_type_t type, const char *s)
-{
-    char text[MAXPRINTMSG];
-    char buf[MAX_QPATH];
     char *p, *maxp;
-    size_t len;
-    ssize_t ret;
+    size_t len = strlen(prefix);
     int c;
 
-    if (logfile_prefix->string[0]) {
-        p = strchr(logfile_prefix->string, '@');
-        if (p) {
-            // expand it in place, hacky
-            switch (type) {
-            case PRINT_TALK:      *p = 'T'; break;
-            case PRINT_DEVELOPER: *p = 'D'; break;
-            case PRINT_WARNING:   *p = 'W'; break;
-            case PRINT_ERROR:     *p = 'E'; break;
-            case PRINT_NOTICE:    *p = 'N'; break;
-            default:              *p = 'A'; break;
-            }
-        }
-        len = format_local_time(buf, sizeof(buf), logfile_prefix->string);
-        if (p) {
-            *p = '@';
-        }
-    } else {
-        len = 0;
-    }
-
-    p = text;
-    maxp = text + sizeof(text) - 1;
-    while (*s) {
-        if (com_logNewline) {
-            if (len > 0 && p + len < maxp) {
-                memcpy(p, buf, len);
+    p = buf;
+    maxp = buf + size;
+    while (*text) {
+        if (!*state) {
+            if (len > 0 && len < maxp - p) {
+                memcpy(p, prefix, len);
                 p += len;
             }
-            com_logNewline = qfalse;
+            *state = true;
         }
 
         if (p == maxp) {
             break;
         }
 
-        c = *s++;
+        c = *text++;
         if (c == '\n') {
-            com_logNewline = qtrue;
+            *state = false;
         } else {
             c = Q_charascii(c);
         }
 
         *p++ = c;
     }
-    *p = 0;
 
-    len = p - text;
-    ret = FS_Write(text, len, com_logFile);
-    if (ret != len) {
-        // zero handle BEFORE doing anything else to avoid recursion
-        qhandle_t tmp = com_logFile;
-        com_logFile = 0;
-        FS_FCloseFile(tmp);
-        Com_EPrintf("Couldn't write console log: %s\n", Q_ErrorString(ret));
-        Cvar_Set("logfile", "0");
+    return p - buf;
+}
+
+static void format_prefix(print_type_t type, char *prefix, size_t size)
+{
+    char *p;
+#ifndef _WIN32
+    if (!strncmp(prefix, "<?>", 3)) {
+        prefix[1] = "657435"[type];
     }
+#endif
+    if ((p = strchr(prefix, '@'))) {
+        *p = "ATDWEN"[type];
+    }
+    if (strchr(prefix, '%')) {
+        char tmp[MAX_QPATH];
+        Com_FormatLocalTime(tmp, sizeof(tmp), prefix);
+        Q_strlcpy(prefix, tmp, size);
+    }
+}
+
+static void logfile_write(print_type_t type, const char *text)
+{
+    char buf[MAXPRINTMSG];
+    char prefix[MAX_QPATH];
+
+    Q_strlcpy(prefix, logfile_prefix->string, sizeof(prefix));
+    format_prefix(type, prefix, sizeof(prefix));
+
+    size_t len = prefix_lines(buf, sizeof(buf), text, prefix, &com_logNewline);
+    int ret = FS_Write(buf, len, com_logFile);
+    if (ret == len) {
+        return;
+    }
+
+    // zero handle BEFORE doing anything else to avoid recursion
+    qhandle_t tmp = com_logFile;
+    com_logFile = 0;
+    FS_CloseFile(tmp);
+    Com_EPrintf("Couldn't write console log: %s\n", Q_ErrorString(ret));
+    Cvar_Set("logfile", "0");
+}
+
+static void console_write(print_type_t type, const char *text)
+{
+    char buf[MAXPRINTMSG];
+    char prefix[MAX_QPATH];
+
+    Q_strlcpy(prefix, console_prefix->string, sizeof(prefix));
+    format_prefix(type, prefix, sizeof(prefix));
+
+    size_t len = prefix_lines(buf, sizeof(buf), text, prefix, &com_conNewline);
+    Sys_ConsoleOutput(buf, len);
 }
 
 #ifndef _WIN32
@@ -384,13 +383,13 @@ void Com_SetLastError(const char *msg)
     if (msg) {
         Q_strlcpy(com_errorMsg, msg, sizeof(com_errorMsg));
     } else {
-        strcpy(com_errorMsg, "No error");
+        com_errorMsg[0] = 0;
     }
 }
 
-char *Com_GetLastError(void)
+const char *Com_GetLastError(void)
 {
-    return com_errorMsg;
+    return com_errorMsg[0] ? com_errorMsg : "No error";
 }
 
 /*
@@ -419,11 +418,7 @@ void Com_LPrintf(print_type_t type, const char *fmt, ...)
     va_end(argptr);
 
     if (type == PRINT_ERROR && !com_errorEntered && len) {
-        size_t errlen = len;
-
-        if (errlen >= sizeof(com_errorMsg)) {
-            errlen = sizeof(com_errorMsg) - 1;
-        }
+        size_t errlen = min(len, sizeof(com_errorMsg) - 1);
 
         // save error msg
         memcpy(com_errorMsg, msg, errlen);
@@ -439,11 +434,13 @@ void Com_LPrintf(print_type_t type, const char *fmt, ...)
         Com_Redirect(msg, len);
     } else {
         switch (type) {
+        case PRINT_ALL:
+            break;
         case PRINT_TALK:
             Com_SetColor(COLOR_ALT);
             break;
         case PRINT_DEVELOPER:
-            Com_SetColor(COLOR_BLUE);
+            Com_SetColor(COLOR_GREEN);
             break;
         case PRINT_WARNING:
             Com_SetColor(COLOR_YELLOW);
@@ -455,14 +452,14 @@ void Com_LPrintf(print_type_t type, const char *fmt, ...)
             Com_SetColor(COLOR_CYAN);
             break;
         default:
-            break;
+            Q_assert(!"bad type");
         }
 
         // graphical console
         Con_Print(msg);
 
         // debugging console
-        Sys_ConsoleOutput(msg);
+        console_write(type, msg);
 
 #ifdef _WIN32
 		OutputDebugStringA(msg);
@@ -501,7 +498,7 @@ void Com_Error(error_type_t code, const char *fmt, ...)
 
     // may not be entered recursively
     if (com_errorEntered) {
-#ifdef _DEBUG
+#if USE_DEBUG
         if (com_debug_break && com_debug_break->integer) {
             Sys_DebugBreak();
         }
@@ -509,7 +506,7 @@ void Com_Error(error_type_t code, const char *fmt, ...)
         Sys_Error("recursive error after: %s", com_errorMsg);
     }
 
-    com_errorEntered = qtrue;
+    com_errorEntered = true;
 
     va_start(argptr, fmt);
     len = Q_vscnprintf(msg, sizeof(msg), fmt, argptr);
@@ -535,8 +532,6 @@ void Com_Error(error_type_t code, const char *fmt, ...)
     // reset Com_Printf recursion level
     com_printEntered = 0;
 
-    X86_POP_FPCW;
-
     if (code == ERR_DISCONNECT || code == ERR_RECONNECT) {
         Com_WPrintf("%s\n", com_errorMsg);
         SV_Shutdown(va("Server was killed: %s\n", com_errorMsg), code);
@@ -544,7 +539,7 @@ void Com_Error(error_type_t code, const char *fmt, ...)
         goto abort;
     }
 
-#ifdef _DEBUG
+#if USE_DEBUG
     if (com_debug_break && com_debug_break->integer) {
         Sys_DebugBreak();
     }
@@ -581,7 +576,7 @@ abort:
     if (com_logFile) {
         FS_Flush(com_logFile);
     }
-    com_errorEntered = qfalse;
+    com_errorEntered = false;
     longjmp(com_abortframe, -1);
 }
 
@@ -590,13 +585,6 @@ void Com_AbortFunc(void (*func)(void *), void *arg)
     com_abort_func = func;
     com_abort_arg = arg;
 }
-
-#ifdef _WIN32
-void Com_AbortFrame(void)
-{
-    longjmp(com_abortframe, -1);
-}
-#endif
 
 /*
 =============
@@ -609,7 +597,7 @@ do the apropriate things. This function never returns.
 void Com_Quit(const char *reason, error_type_t type)
 {
     char buffer[MAX_STRING_CHARS];
-    char *what = type == ERR_RECONNECT ? "restarted" : "quit";
+    const char *what = type == ERR_RECONNECT ? "restarted" : "quit";
 
     if (reason && *reason) {
         Q_snprintf(buffer, sizeof(buffer),
@@ -624,6 +612,7 @@ void Com_Quit(const char *reason, error_type_t type)
     NET_Shutdown();
     logfile_close();
     FS_Shutdown();
+    Com_ShutdownAsyncWork();
 
     Sys_Quit();
     // doesn't get there
@@ -651,12 +640,12 @@ static void Com_Recycle_f(void)
 
 size_t Com_Time_m(char *buffer, size_t size)
 {
-    return format_local_time(buffer, size, com_time_format->string);
+    return Com_FormatLocalTime(buffer, size, com_time_format->string);
 }
 
 static size_t Com_Date_m(char *buffer, size_t size)
 {
-    return format_local_time(buffer, size, com_date_format->string);
+    return Com_FormatLocalTime(buffer, size, com_date_format->string);
 }
 
 size_t Com_Uptime_m(char *buffer, size_t size)
@@ -671,32 +660,32 @@ size_t Com_UptimeLong_m(char *buffer, size_t size)
 
 static size_t Com_Random_m(char *buffer, size_t size)
 {
-    return Q_scnprintf(buffer, size, "%d", rand_byte() % 10);
+    return Q_scnprintf(buffer, size, "%d", Q_rand() % 10);
 }
 
 static size_t Com_MapList_m(char *buffer, size_t size)
 {
     int i, numFiles;
     void **list;
-    char *s, *p;
     size_t len, total = 0;
 
-    list = FS_ListFiles("maps", ".bsp", 0, &numFiles);
-    for (i = 0; i < numFiles; i++) {
-        s = list[i];
-        p = COM_FileExtension(list[i]);
-        *p = 0;
-        len = strlen(s);
-        if (total + len + 1 < size) {
-            memcpy(buffer + total, s, len);
-            buffer[total + len] = ' ';
-            total += len + 1;
+    list = FS_ListFiles("maps", ".bsp", FS_SEARCH_STRIPEXT, &numFiles);
+    for (i = 0; i < numFiles && total < SIZE_MAX; i++) {
+        len = strlen(list[i]);
+        if (i)
+            total++;
+        total += len = min(len, SIZE_MAX - total);
+        if (total < size) {
+            if (i)
+                *buffer++ = ' ';
+            memcpy(buffer, list[i], len);
+            buffer += len;
         }
-        Z_Free(s);
     }
-    buffer[total] = 0;
+    if (size)
+        *buffer = 0;
 
-    Z_Free(list);
+    FS_FreeList(list);
     return total;
 }
 
@@ -704,27 +693,6 @@ static void Com_LastError_f(void)
 {
     Com_Printf("%s\n", com_errorMsg);
 }
-
-#if 0
-static void Com_Setenv_f(void)
-{
-    int argc = Cmd_Argc();
-
-    if (argc > 2) {
-        Q_setenv(Cmd_Argv(1), Cmd_ArgsFrom(2));
-    } else if (argc == 2) {
-        char *env = getenv(Cmd_Argv(1));
-
-        if (env) {
-            Com_Printf("%s=%s\n", Cmd_Argv(1), env);
-        } else {
-            Com_Printf("%s undefined\n", Cmd_Argv(1));
-        }
-    } else {
-        Com_Printf("Usage: %s <name> [value]\n", Cmd_Argv(0));
-    }
-}
-#endif
 
 void Com_Address_g(genctx_t *ctx)
 {
@@ -736,11 +704,8 @@ void Com_Address_g(genctx_t *ctx)
         if (!var) {
             break;
         }
-        if (!var->string[0]) {
-            continue;
-        }
-        if (!Prompt_AddMatch(ctx, var->string)) {
-            break;
+        if (var->string[0]) {
+            Prompt_AddMatch(ctx, var->string);
         }
     }
 }
@@ -761,7 +726,7 @@ void Com_Generic_c(genctx_t *ctx, int argnum)
     }
 
     // protect against possible duplicates
-    ctx->ignoredups = qtrue;
+    ctx->ignoredups = true;
 
     s = Cmd_Argv(ctx->argnum - argnum);
 
@@ -782,11 +747,8 @@ void Com_Color_g(genctx_t *ctx)
 {
     int color;
 
-    for (color = 0; color < 8; color++) {
-        if (!Prompt_AddMatch(ctx, colorNames[color])) {
-            break;
-        }
-    }
+    for (color = 0; color < COLOR_ALT; color++)
+        Prompt_AddMatch(ctx, colorNames[color]);
 }
 #endif
 
@@ -803,7 +765,7 @@ the client and server initialize for the first time.
 Other commands are added late, after all initialization is complete.
 ===============
 */
-static void Com_AddEarlyCommands(qboolean clear)
+static void Com_AddEarlyCommands(bool clear)
 {
     int     i;
     char    *s;
@@ -836,17 +798,17 @@ Com_AddLateCommands
 Adds command line parameters as script statements
 Commands lead with a + and continue until another +
 
-Returns qtrue if any late commands were added, which
+Returns true if any late commands were added, which
 will keep the demoloop from immediately starting
 
 Assumes +set commands are already filtered out
 =================
 */
-static qboolean Com_AddLateCommands(void)
+static bool Com_AddLateCommands(void)
 {
     int     i;
     char    *s;
-    qboolean ret = qfalse;
+    bool    ret = false;
 
     for (i = 1; i < com_argc; i++) {
         s = com_argv[i];
@@ -862,7 +824,7 @@ static qboolean Com_AddLateCommands(void)
             Cbuf_AddText(&cmd_buffer, " ");
         }
         Cbuf_AddText(&cmd_buffer, s);
-        ret = qtrue;
+        ret = true;
     }
 
     if (ret) {
@@ -875,12 +837,12 @@ static qboolean Com_AddLateCommands(void)
 
 void Com_AddConfigFile(const char *name, unsigned flags)
 {
-    qerror_t ret;
+    int ret;
 
     ret = Cmd_ExecuteFile(name, flags);
     if (ret == Q_ERR_SUCCESS) {
         Cbuf_Execute(&cmd_buffer);
-    } else if (ret != Q_ERR_NOENT) {
+    } else if (ret != Q_ERR(ENOENT)) {
         Com_WPrintf("Couldn't exec %s: %s\n", name, Q_ErrorString(ret));
     }
 }
@@ -898,15 +860,12 @@ void Qcommon_Init(int argc, char **argv)
     com_argc = argc;
     com_argv = argv;
 
-    Com_SetLastError(NULL);
-
-    X86_SetFPCW();
-
-    srand(time(NULL));
+    Q_srand(time(NULL));
 
     // prepare enough of the subsystems to handle
     // cvar and command buffer management
     Z_Init();
+    Hunk_Init();
     MSG_Init();
     Cbuf_Init();
     Cmd_Init();
@@ -918,11 +877,13 @@ void Qcommon_Init(int argc, char **argv)
     //
     // init commands and vars
     //
+#if USE_TESTS
     z_perturb = Cvar_Get("z_perturb", "0", 0);
+#endif
 #if USE_CLIENT
     host_speeds = Cvar_Get("host_speeds", "0", 0);
 #endif
-#ifdef _DEBUG
+#if USE_DEBUG
     developer = Cvar_Get("developer", "0", 0);
 #endif
     timescale = Cvar_Get("timescale", "1", CVAR_CHEAT);
@@ -931,6 +892,7 @@ void Qcommon_Init(int argc, char **argv)
     logfile_flush = Cvar_Get("logfile_flush", "1", 0);
     logfile_name = Cvar_Get("logfile_name", "console", 0);
     logfile_prefix = Cvar_Get("logfile_prefix", "[%Y-%m-%d %H:%M] ", 0);
+    console_prefix = Cvar_Get("console_prefix", "", 0);
 #if USE_CLIENT
     dedicated = Cvar_Get("dedicated", "0", CVAR_NOSET);
 	backdoor = Cvar_Get("backdoor", "0", CVAR_ARCHIVE);
@@ -948,7 +910,7 @@ void Qcommon_Init(int argc, char **argv)
 #else
     com_time_format = Cvar_Get("com_time_format", "%H:%M", 0);
 #endif
-#ifdef _DEBUG
+#if USE_DEBUG
     com_debug_break = Cvar_Get("com_debug_break", "0", 0);
 #endif
     com_fatal_error = Cvar_Get("com_fatal_error", "0", 0);
@@ -963,7 +925,7 @@ void Qcommon_Init(int argc, char **argv)
     allow_download_pics = Cvar_Get("allow_download_pics", "1", CVAR_ARCHIVE);
     allow_download_others = Cvar_Get("allow_download_others", "0", 0);
 
-    rcon_password = Cvar_Get("rcon_password", "", CVAR_ARCHIVE);
+    rcon_password = Cvar_Get("rcon_password", "", CVAR_PRIVATE);
 
     Cmd_AddCommand("z_stats", Z_Stats_f);
 
@@ -983,7 +945,7 @@ void Qcommon_Init(int argc, char **argv)
     // a basedir or cddir needs to be set before execing
     // config files, but we want other parms to override
     // the settings of the config files
-    Com_AddEarlyCommands(qfalse);
+    Com_AddEarlyCommands(false);
 
     Sys_Init();
 
@@ -994,7 +956,7 @@ void Qcommon_Init(int argc, char **argv)
     Sys_RunConsole();
 
     // no longer allow CVAR_NOSET modifications
-    com_initialized = qtrue;
+    com_initialized = true;
 
     // after FS is initialized, open logfile
     logfile_enable->changed = logfile_enable_changed;
@@ -1002,15 +964,9 @@ void Qcommon_Init(int argc, char **argv)
     logfile_name->changed = logfile_param_changed;
     logfile_enable_changed(logfile_enable);
 
-    // execute configs: default.cfg and q2rtx.cfg may come from the packfile, but config.cfg
-    // and autoexec.cfg must be real files within the game directory
-	Com_AddConfigFile(COM_DEFAULT_CFG, 0);
-	Com_AddConfigFile(COM_Q2RTX_CFG, 0);
-    Com_AddConfigFile(COM_CONFIG_CFG, FS_TYPE_REAL | FS_PATH_GAME);
-    Com_AddConfigFile(COM_AUTOEXEC_CFG, FS_TYPE_REAL | FS_PATH_GAME);
-    Com_AddConfigFile(COM_POSTEXEC_CFG, FS_TYPE_REAL);
+    FS_AddConfigFiles(true);
 
-    Com_AddEarlyCommands(qtrue);
+    Com_AddEarlyCommands(true);
 
     Cmd_AddCommand("lasterror", Com_LastError_f);
 
@@ -1021,7 +977,8 @@ void Qcommon_Init(int argc, char **argv)
 
     // Print the engine version early so that it's definitely included in the console log.
     // The log file is opened during the execution of one of the config files above.
-    Com_LPrintf(PRINT_NOTICE, "\nEngine version: " APPLICATION " " LONG_VERSION_STRING ", built on " __DATE__ "\n\n");
+    Com_NPrintf("\nEngine version: " APPLICATION " " LONG_VERSION_STRING ", built on " __DATE__ "\n\n");
+    Com_DPrintf("Compiled features: %s\n", Com_GetFeatures());
 
     Netchan_Init();
     NET_Init();
@@ -1036,7 +993,7 @@ void Qcommon_Init(int argc, char **argv)
     // add + commands from command line
     if (!Com_AddLateCommands()) {
         // if the user didn't give any commands, run default action
-        char *cmd = COM_DEDICATED ? "dedicated_start" : "client_start";
+        const char *cmd = COM_DEDICATED ? "dedicated_start" : "client_start";
 
         if ((cmd = Cmd_AliasCommand(cmd)) != NULL) {
             Cbuf_AddText(&cmd_buffer, cmd);
@@ -1092,6 +1049,8 @@ void Qcommon_Frame(void)
         return;            // an ERR_DROP was thrown
     }
 
+    Com_CompleteAsyncWork();
+
 #if USE_CLIENT
     time_before = time_event = time_between = time_after = 0;
 
@@ -1115,7 +1074,7 @@ void Qcommon_Frame(void)
     // spin until msec is non-zero if running a client
     if (!dedicated->integer && !com_timedemo->integer) {
         while (msec < 1) {
-            qboolean break_now = CL_ProcessEvents();
+            bool break_now = CL_ProcessEvents();
             com_eventTime = Sys_Milliseconds();
             msec = com_eventTime - oldtime;
             if (break_now)

@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef FORMAT_PAK_H
-#define FORMAT_PAK_H
+#pragma once
 
 /*
 ========================================================================
@@ -27,9 +26,7 @@ The .pak files are just a linear collapse of a directory tree
 ========================================================================
 */
 
-#define IDPAKHEADER        (('K'<<24)+('C'<<16)+('A'<<8)+'P')
-
-#define MAX_FILES_IN_PACK    4096
+#define IDPAKHEADER         MakeLittleLong('P','A','C','K')
 
 typedef struct {
     char        name[56];
@@ -41,5 +38,3 @@ typedef struct {
     uint32_t    dirofs;
     uint32_t    dirlen;
 } dpackheader_t;
-
-#endif // FORMAT_PAK_H

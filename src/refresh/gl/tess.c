@@ -58,9 +58,7 @@ void GL_Flush2D(void)
     qglDrawElements(GL_TRIANGLES, tess.numindices, QGL_INDEX_ENUM, tess.indices);
 
     if (gl_showtris->integer > 1) {
-        GL_EnableOutlines();
-        qglDrawElements(GL_TRIANGLES, tess.numindices, QGL_INDEX_ENUM, tess.indices);
-        GL_DisableOutlines();
+        GL_DrawOutlines(tess.numindices, tess.indices);
     }
 
     GL_UnlockArrays();
@@ -73,7 +71,7 @@ void GL_Flush2D(void)
     tess.flags = 0;
 }
 
-#define PARTICLE_SIZE   (1 + M_SQRT1_2)
+#define PARTICLE_SIZE   (1 + (float)M_SQRT1_2)
 #define PARTICLE_SCALE  (1 / (2 * PARTICLE_SIZE))
 
 void GL_DrawParticles(void)
@@ -81,20 +79,15 @@ void GL_DrawParticles(void)
     particle_t *p;
     int total, count;
     vec3_t transformed;
-    vec_t scale, dist;
+    vec_t scale, scale2, dist;
     color_t color;
     int numverts;
     vec_t *dst_vert;
     uint32_t *dst_color;
-    int blend;
+    int bits;
 
     if (!glr.fd.num_particles)
         return;
-
-    if (gl_partstyle->integer)
-        blend = GLS_BLEND_ADD;
-    else
-        blend = GLS_BLEND_BLEND;
 
     GL_LoadMatrix(glr.viewmatrix);
 
@@ -102,20 +95,21 @@ void GL_DrawParticles(void)
     GL_TexCoordPointer(2, 5, tess.vertices + 3);
     GL_ColorBytePointer(4, 0, tess.colors);
 
+    bits = (gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) | GLS_DEPTHMASK_FALSE;
+
     p = glr.fd.particles;
     total = glr.fd.num_particles;
     do {
         GL_BindTexture(0, TEXNUM_PARTICLE);
-        GL_StateBits(blend | GLS_DEPTHMASK_FALSE);
+        GL_StateBits(bits);
         GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
 
-        count = total;
-        if (count > TESS_MAX_VERTICES / 3)
-            count = TESS_MAX_VERTICES / 3;
-
+        count = min(total, TESS_MAX_VERTICES / 3);
         total -= count;
 
-        numverts = 0;
+        dst_vert = tess.vertices;
+        dst_color = (uint32_t *)tess.colors;
+        numverts = count * 3;
         do {
             VectorSubtract(p->origin, glr.fd.vieworg, transformed);
             dist = DotProduct(transformed, glr.viewaxis[0]);
@@ -123,39 +117,38 @@ void GL_DrawParticles(void)
             scale = gl_partscale->value;
             if (dist > 20)
                 scale += dist * 0.01f;
+            scale2 = scale * PARTICLE_SCALE;
 
-            if (p->color == -1) {
-                color.u32 = p->rgba.u32;
-            } else {
-                color.u32 = d_8to24table[p->color & 0xff];
-                color.u8[3] = 255 * p->alpha;
-            }
-
-            dst_vert = tess.vertices + numverts * 5;
-            VectorMA(p->origin, scale * PARTICLE_SCALE, glr.viewaxis[1], dst_vert);
-            VectorMA(dst_vert, -scale * PARTICLE_SCALE, glr.viewaxis[2], dst_vert);
-            VectorMA(dst_vert, scale, glr.viewaxis[2], dst_vert + 5);
-            VectorMA(dst_vert, -scale, glr.viewaxis[1], dst_vert + 10);
+            VectorMA(p->origin, scale2, glr.viewaxis[1], dst_vert);
+            VectorMA(dst_vert, -scale2, glr.viewaxis[2], dst_vert);
+            VectorMA(dst_vert,  scale,  glr.viewaxis[2], dst_vert +  5);
+            VectorMA(dst_vert, -scale,  glr.viewaxis[1], dst_vert + 10);
 
             dst_vert[ 3] = 0;               dst_vert[ 4] = 0;
             dst_vert[ 8] = 0;               dst_vert[ 9] = PARTICLE_SIZE;
             dst_vert[13] = PARTICLE_SIZE;   dst_vert[14] = 0;
 
-            dst_color = (uint32_t *)tess.colors + numverts;
+            dst_vert += 15;
+
+            if (p->color == -1) {
+                color.u32 = p->rgba.u32;
+            } else {
+                color.u32 = d_8to24table[p->color & 0xff];
+            }
+            color.u8[3] *= p->alpha;
+
             dst_color[0] = color.u32;
             dst_color[1] = color.u32;
             dst_color[2] = color.u32;
+            dst_color += 3;
 
             p++;
-            numverts += 3;
         } while (--count);
 
         qglDrawArrays(GL_TRIANGLES, 0, numverts);
 
         if (gl_showtris->integer) {
-            GL_EnableOutlines();
-            qglDrawArrays(GL_TRIANGLES, 0, numverts);
-            GL_DisableOutlines();
+            GL_DrawOutlines(numverts, NULL);
         }
     } while (total);
 }
@@ -199,18 +192,20 @@ void GL_DrawBeams(void)
         VectorSubtract(end, start, d1);
         VectorSubtract(glr.fd.vieworg, start, d2);
         CrossProduct(d1, d2, d3);
-        length = VectorLength(d3);
-        length = ent->frame * 1.2f / length;
+        VectorNormalize(d3);
+        length = ent->frame * 1.2f;
         VectorScale(d3, length, d3);
 
         length = VectorLength(d1);
+        if (length < 0.001f)
+            continue;
 
         if (ent->skinnum == -1) {
             color.u32 = ent->rgba.u32;
         } else {
             color.u32 = d_8to24table[ent->skinnum & 0xff];
-            color.u8[3] = 255 * ent->alpha;
         }
+        color.u8[3] *= ent->alpha;
 
         if (numverts + 4 > TESS_MAX_VERTICES ||
             numindices + 6 > TESS_MAX_INDICES) {
@@ -254,30 +249,24 @@ void GL_DrawBeams(void)
 
 void GL_BindArrays(void)
 {
-    vec_t *ptr;
-
     if (gl_static.world.vertices) {
-        ptr = tess.vertices;
-    } else {
-        ptr = NULL;
-        qglBindBufferARB(GL_ARRAY_BUFFER_ARB, gl_static.world.bufnum);
-    }
-
-    GL_VertexPointer(3, VERTEX_SIZE, ptr + 0);
-
-    if (gl_lightmap->integer) {
-        GL_TexCoordPointer(2, VERTEX_SIZE, ptr + 6);
-    } else {
-        GL_TexCoordPointer(2, VERTEX_SIZE, ptr + 4);
+        GL_VertexPointer(3, VERTEX_SIZE, tess.vertices);
+        GL_TexCoordPointer(2, VERTEX_SIZE, tess.vertices + 4);
         if (lm.nummaps) {
-            GL_LightCoordPointer(2, VERTEX_SIZE, ptr + 6);
+            GL_LightCoordPointer(2, VERTEX_SIZE, tess.vertices + 6);
         }
-    }
+        GL_ColorBytePointer(4, VERTEX_SIZE, (GLubyte *)(tess.vertices + 3));
+    } else {
+        qglBindBuffer(GL_ARRAY_BUFFER, gl_static.world.bufnum);
 
-    GL_ColorBytePointer(4, VERTEX_SIZE, (GLubyte *)(ptr + 3));
+        GL_VertexPointer(3, VERTEX_SIZE, VBO_OFS(0));
+        GL_TexCoordPointer(2, VERTEX_SIZE, VBO_OFS(4));
+        if (lm.nummaps) {
+            GL_LightCoordPointer(2, VERTEX_SIZE, VBO_OFS(6));
+        }
+        GL_ColorBytePointer(4, VERTEX_SIZE, VBO_OFS(3));
 
-    if (!gl_static.world.vertices) {
-        qglBindBufferARB(GL_ARRAY_BUFFER_ARB, 0);
+        qglBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 }
 
@@ -293,6 +282,10 @@ void GL_Flush3D(void)
     if (q_likely(tess.texnum[1])) {
         state |= GLS_LIGHTMAP_ENABLE;
         array |= GLA_LMTC;
+
+        if (q_unlikely(gl_lightmap->integer)) {
+            state &= ~GLS_INTENSITY_ENABLE;
+        }
     }
 
     if (!(state & GLS_TEXTURE_REPLACE)) {
@@ -314,9 +307,7 @@ void GL_Flush3D(void)
     qglDrawElements(GL_TRIANGLES, tess.numindices, QGL_INDEX_ENUM, tess.indices);
 
     if (gl_showtris->integer) {
-        GL_EnableOutlines();
-        qglDrawElements(GL_TRIANGLES, tess.numindices, QGL_INDEX_ENUM, tess.indices);
-        GL_DisableOutlines();
+        GL_DrawOutlines(tess.numindices, tess.indices);
     }
 
     if (gl_static.world.vertices) {
@@ -351,10 +342,9 @@ static int GL_CopyVerts(mface_t *surf)
 
 static int GL_TextureAnimation(mtexinfo_t *tex)
 {
-    int c;
-
     if (q_unlikely(tex->next)) {
-        c = glr.ent->frame % tex->numframes;
+        unsigned c = (unsigned)glr.ent->frame % tex->numframes;
+
         while (c) {
             tex = tex->next;
             c--;
@@ -372,15 +362,12 @@ void GL_DrawFace(mface_t *surf)
     QGL_INDEX_TYPE *dst_indices;
     int i, j;
 
-    if (q_unlikely(gl_lightmap->integer)) {
-        texnum[0] = surf->texnum[1];
-        if (!texnum[0])
-            texnum[0] = GL_TextureAnimation(surf->texinfo);
-        texnum[1] = 0;
+    if (q_unlikely(gl_lightmap->integer && surf->texnum[1])) {
+        texnum[0] = TEXNUM_WHITE;
     } else {
         texnum[0] = GL_TextureAnimation(surf->texinfo);
-        texnum[1] = surf->texnum[1];
     }
+    texnum[1] = surf->texnum[1];
 
     if (tess.texnum[0] != texnum[0] ||
         tess.texnum[1] != texnum[1] ||
@@ -413,17 +400,6 @@ void GL_DrawFace(mface_t *surf)
     c.facesDrawn++;
 }
 
-static inline void GL_DrawChain(mface_t **head)
-{
-    mface_t *face;
-
-    for (face = *head; face; face = face->next) {
-        GL_DrawFace(face);
-    }
-
-    *head = NULL;
-}
-
 void GL_ClearSolidFaces(void)
 {
     int i;
@@ -435,26 +411,40 @@ void GL_ClearSolidFaces(void)
 
 void GL_DrawSolidFaces(void)
 {
+    mface_t *face;
     int i;
 
     for (i = 0; i < FACE_HASH_SIZE; i++) {
-        GL_DrawChain(&faces_head[i]);
+        for (face = faces_head[i]; face; face = face->next) {
+            GL_DrawFace(face);
+        }
+        faces_head[i] = NULL;
     }
 }
 
 void GL_DrawAlphaFaces(void)
 {
+    mface_t *face;
+
     if (!faces_alpha) {
         return;
     }
 
-    glr.ent = &gl_world;
-
-    GL_LoadMatrix(glr.viewmatrix);
+    glr.ent = NULL;
 
     GL_BindArrays();
 
-    GL_DrawChain(&faces_alpha);
+    for (face = faces_alpha; face; face = face->next) {
+        if (glr.ent != face->entity) {
+            glr.ent = face->entity;
+            GL_Flush3D();
+            GL_SetEntityAxis();
+            GL_RotateForEntity();
+        }
+        GL_DrawFace(face);
+    }
+
+    faces_alpha = NULL;
 
     GL_Flush3D();
 }
@@ -465,6 +455,7 @@ void GL_AddSolidFace(mface_t *face)
 
     hash = face->texnum[0] ^ face->texnum[1] ^ face->statebits;
     hash ^= hash >> FACE_HASH_BITS;
+    hash ^= hash >> (FACE_HASH_BITS * 2);
     hash &= FACE_HASH_MASK;
 
     // preserve front-to-back ordering
@@ -473,9 +464,10 @@ void GL_AddSolidFace(mface_t *face)
     faces_next[hash] = &face->next;
 }
 
-void GL_AddAlphaFace(mface_t *face)
+void GL_AddAlphaFace(mface_t *face, entity_t *ent)
 {
     // draw back-to-front
+    face->entity = ent;
     face->next = faces_alpha;
     faces_alpha = face;
 }

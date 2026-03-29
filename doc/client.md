@@ -100,15 +100,13 @@ Controls rendering of entities with `EF_GIB` flag set. When using Q2PRO
 protocol, disabling this saves some bandwidth since the server stops
 sending these entities at all. Default value is 1 (enabled).
 
-#### `cl_gun`
-Controls rendering of the player's own gun model. When using R1Q2 or Q2PRO
-protocol, disabling this saves some bandwidth since the server stops
-sending gun updates at all. Default value is 1 (enabled).
-
 #### `cl_footsteps`
 Controls footstep sounds. When using Q2PRO protocol, disabling this saves
 some bandwidth since the server stops sending footstep events at all.
-Default value is 1 (enabled).
+Default value is 1.
+  - 0 — footsteps disabled
+  - 1 — use custom footsteps per surface (if found)
+  - 2 — use default footstep sound
 
 #### `cl_updaterate`
 Specifies the perferred update rate requested from Q2PRO servers. Only used
@@ -242,13 +240,36 @@ sprite explosion effects. Default value is 20 ms.
 When this variable is set to 1, regular mushroom explosion models are 
 replaced with sprites. Affects both OpenGL and RTX renderers. Default value is 1.
 
+#### `cl_dlight_hacks`
+Toggles miscellaneous dynamic light effects options. This variable
+is a bitmask. Default value is 0.
+  - 1 — make rocket projectile light red instead of yellow
+  - 2 — make rocket/grenade explosion light radius smaller
+  - 4 — disable muzzle flashes for machinegun and chaingun
+
 #### `cl_noglow`
 Disables the glowing effect on bonus entities like ammo, health, etc.
 Default value is 0 (glowing enabled).
 
+#### `cl_nobob`
+Disables the bobbing effect on bonus entities like armor, weapons, etc.
+Default value is 0 (bobbing enabled).
+
 #### `cl_gunalpha`
 Specifies opacity level of the player's own gun model. Default value is 1
 (fully opaque).
+
+#### `cl_gunscale`
+Specifies the scale for the gun model. It should be set to something less
+than 1.0 so that the gun wouldn't intersect with walls and other objects
+in RTX mode.
+
+#### `cl_gunfov`
+Specifies custom FOV value for drawing player's own gun model. Default
+value is 90. Set to 0 to draw with current FOV value.
+
+#### `cl_gun_x`, `cl_gun_y`, `cl_gun_z`
+Specifies custom gun model offset. Default value is 0.
 
 #### `cl_particle_num_factor`
 Multiplier for the count of particles generated for various effects such as water 
@@ -273,6 +294,12 @@ Specifies if ambient sounds are played. Default value is 1.
 - 3 — only ambient sounds from player entity are enabled (railgun hum,
     hand grenade ticks, etc)
 
+#### `s_underwater`
+Enables lowpass sound filter when underwater. Default value is 1 (enabled).
+
+#### `s_underwater_gain_hf`
+Specifies HF gain value for lowpass sound filter. Default value is 0.25.
+
 #### `s_auto_focus`
 Specifies the minimum focus level main Q2PRO window should have for sound
 to be activated.  Default value is 0.
@@ -295,9 +322,12 @@ add more delay. Only affects the DMA sound engine. Default value is 0.1.
 Swap left and right audio channels. Only effective when using DMA sound
 engine. Default value is 0 (don't swap).
 
-#### `al_driver`
-Specifies the name of OpenAL driver to use. Default value is `openal32`
-on Windows, and ‘libopenal.so.1’ on Linux.
+#### `s_driver`
+Specifies which DMA sound driver to use. Default value is empty (detect
+automatically). Possible sound drivers are (not all of them are typically
+available at the same time, depending on how client was compiled):
+  - wave — Windows waveform audio
+  - sdl — SDL2 audio
 
 #### `al_device`
 Specifies the name of OpenAL device to use. Format of this value depends on
@@ -307,7 +337,7 @@ sound output device is used.
 *TIP*: On Windows, there are two well-known OpenAL implementations available:
 [OpenAL32](http://connect.creativelabs.com/openal/) from Creative, with
 support for harware acceleration on certain audio cards, and an open source
-software implementation named [OpenAL Soft](http://kcat.strangesoft.net/openal.html).
+software implementation named [OpenAL Soft](https://openal-soft.org/).
 Both should work with Q2PRO, but to get the results most perceptually close to
 original Quake 2 sound, I recommend using OpenAL Soft. Creative's
 implementation seems to perform some default effects processing even when not
@@ -367,6 +397,12 @@ variable is a bitmask. Default value is 0.
   - 1 — when new command is entered
   - 2 — when new lines are printed
 
+#### `con_auto_chat`
+Specifies how console commands not starting with a slash or backslash
+are handled while in game. Default value is 0.
+  - 0 — handle as regular commands
+  - 1 — forward as chat
+  - 2 — forward as team chat
 
 ### Game Screen
 
@@ -560,6 +596,12 @@ value is 0 (don't switch video modes).
 Instructs the video driver to use hardware gamma correction for
 implementing `vid_gamma`.  Default value is 0 (use software gamma).
 
+#### `vid_driver`
+Specifies which video driver to use. Default value is empty (detect
+automatically). Possible video drivers are (not all of them are typically
+available at the same time, depending on how client was compiled):
+  - sdl — SDL2 video driver
+
 #### `vid_rtx`
 Switches between the OpenGL (0) and Vulkan RTX (1) renderers.
 Default value is 1.
@@ -598,14 +640,16 @@ Hides the main window title bar. Default is 0 (show title bar).
 Puts the main window on top of other windows. Default is 0 (main window can
 be obscured by other windows).
 
-#### `win_xpfix`
-Temporary disables mouse acceleration setting applied by the OS. Only
-effective when legacy Windows mouse input is in use, otherwise ignored.
-Default value is 0 (don't modify OS setting).
+#### `sys_viewlog`
+Show system console window when running a client. Can be set from command
+line only.
 
-#### `win_rawmouse`
-Enables raw mouse input instead of legacy Windows mouse input. Default
-value is 1 (use raw input).
+#### `sys_disablecrashdump`
+Disable crash dump generation. Can be set from command line only.
+
+#### `sys_exitonerror`
+Exit on fatal error instead of showing error message. Can be set from
+command line only.
 
 ### Vulkan RTX Renderer
 
@@ -694,6 +738,29 @@ and blue channel shows direct specular gradients. Default value is 0.
 #### `flt_taa`
 Enables temporal anti-aliasing and primary ray direction jitter. Default value is 1.
 
+#### `flt_fsr_enable`
+Enables FidelityFX Super Resolution 1.0 ("AMD FSR 1.0") upscaling. Default value is 0.
+If enabled, upscaling is applied when the resolution scale is below 100%, either from
+dynamic resolution scaling or by setting a fixes resolution scale.
+
+There's currently no UI to choose the AMD FSR 1.0 quality mode.
+You can closely approximate that setting by using an appropriate fixed
+resolution scale:
+| AMD FSR 1.0 Quality Mode | Fixed resolution scale |
+| ------------------------ | ---------------------- |
+| Ultra Quality            | 75%                    |
+| Quality                  | 65%                    |
+| Balanced                 | 60%                    |
+| Performance              | 50%                    |
+
+#### `flt_fsr_sharpness`
+FidelityFX Super Resolution 1.0 sharpening amount. Default is 0.2.
+Range is from 0.0 to 2.0, with lower meaning sharper.
+
+#### `flt_fsr_easu`, `flt_fsr_rcas`
+Individual control of the upscaling and sharpening steps of FSR. Both default to 1.
+Intended for testing purposes.
+
 #### `gr_enable`
 Enables the god rays (volumetric lighting) effect. Default value is 1.
 
@@ -778,14 +845,14 @@ Enables the water caustics and tinted glass transmission effects. The setting is
 shared because these effects use the same ray query to find the transparent surfaces.
 Default value is 1.
 
-#### `pt_direct_polygon_lights`, `pt_direct_sphere_lights`
+#### `pt_direct_polygon_lights`, `pt_direct_dyn_lights`
 Switch for direct light sampling mode. Default values are 1.
 
 - -1 — sample direct lights with GI rays as regular emissive surfaces (only for polygonal lights)
 - 0 — do not include direct lights
 - 1 — sample direct lights with next event estimation
 
-#### `pt_indirect_polygon_lights`, `pt_indirect_sphere_lights`
+#### `pt_indirect_polygon_lights`, `pt_indirect_dyn_lights`
 Switch for indirect light sampling mode. See above. Default values are 1.
 
 #### `pt_direct_sun_light`
@@ -803,10 +870,15 @@ Controls if the Depth of Field effect should be used in various rendering modes:
 Enables the laser beam effects. Default value is 1.
 
 #### `pt_enable_nodraw`
-When this cvar is set to 1, all BSP surfaces marked with the `SURF_NODRAW` flag
-will be removed from the world at map load time. Should be enabled on some 
-maps outside of the base Quake 2 game where such surfaces are used to provide 
-fake indoor lighting, normally appearing as sky blocks in the middle of a room.
+When this cvar is set to 1, BSP surfaces marked with the `SURF_NODRAW` flag
+will be removed from the world at map load time, with the exception of those
+with a "SKY" type material specified in the materials database.
+Should be enabled on some maps outside of the base Quake 2 game where such
+surfaces are used to provide fake indoor lighting, normally appearing as sky
+blocks in the middle of a room.
+If set to 2, removes all `SURF_NODRAW` surfaces, including those with a
+"proper" sky surface. Should be used if such fake lighting blocks keep
+showing up.
 Default value is 0.
 
 #### `pt_enable_particles`
@@ -856,7 +928,11 @@ Size of new particles, before they fade out, in world units. Default value is 0.
 Selects the projection to use for rendering. Default value is 0.
 
 - 0 — regular perspective projection
-- 1 — cylindrical projection
+- 1 — panini (cylindrical stereographic) projection
+- 2 — stereographic projection
+- 3 — cylindrical projection
+- 4 — equirectangular projection
+- 5 — mercator projection
 
 #### `pt_reflect_refract`
 Number of reflection or refraction bounces to trace. Default value is 2.
@@ -868,7 +944,8 @@ override. Default value is -1.
 #### `pt_show_sky`
 Enables visualization of skybox geometry, useful for tuning maps for the RTX renderer
 because one can use the `cl_clusterthere` macro to display the clusters for the sky
-and list those clusters in the `baseq2/sky_clusters.txt` file. Default value is 0.
+and list those clusters in map-specific sky cluster file, `maps/sky/<mapname>.txt`.
+Default value is 0.
 
 #### `pt_texture_lod_bias`
 LOD bias for texture sampling. Negative values mean sharper textures, positive values 
@@ -884,6 +961,9 @@ Switch for the experimental thick glass refraction feature. Default value is 0.
 #### `pt_water_density`
 Extinction coefficient scaler for water, slime and lava. Higher values make water thicker.
 Default value is 0.5.
+
+#### `pt_waterwarp`
+Enable post-processing warping screen effect when underwater. Default value is 0 (disabled).
 
 #### `sky_amb_phase_g` 
 Controls the eccentricity of the scattering phase function for the ambient light 
@@ -1038,6 +1118,10 @@ Default value is 1 (downsampling enabled).
 Enable skybox texturing. 0 means to draw sky box in solid black color.
 Default value is 1 (enabled).
 
+#### `gl_waterwarp`
+Enable screen warping effect when underwater. Only effective when using
+GLSL backend. Default value is 0 (disabled).
+
 #### `gl_fontshadow`
 Specifies font shadow width, in pixels, ranging from 0 to 2. Default value
 is 0 (no shadow).
@@ -1131,9 +1215,6 @@ Controls dynamic lightmap updates. Default value is 1.
 - 2 — most dynamic lights are disabled, but lightmap updates are still
     allowed for switchable lights to work
 
-*NOTE*: Dynamic lights may noticeably hurt rendering performance on some video
-cards and drivers, therefore they are disabled by default.
-
 #### `gl_dlight_falloff`
 Makes dynamic lights look a bit smoother, opposed to original jagged Quake
 2 style.  Default value is 1 (enabled).
@@ -1193,6 +1274,12 @@ quality) to 100 (best quality). Default value is 100.
 Specifies compression level of PNG screenshots. Values range from 0 (no
 compression) to 9 (best compression). Default value is 6.
 
+#### `gl_screenshot_template`
+Specifies filename template in "fileXXX" format for ‘screenshot’ command.
+Template must contain at least 3 and at most 9 consecutive ‘X’ in the last
+component. Template may contain slashes to save under subdirectory. Default
+value is "quakeXXX".
+
 #### `gl_shadows`
 Enables rendering of shadows under dynamic entities. Default value is 1.
 
@@ -1200,13 +1287,25 @@ Enables rendering of shadows under dynamic entities. Default value is 1.
 Enables automatic overriding of palettized textures (in WAL or PCX format)
 with truecolor replacements (in PNG, JPG or TGA format) by stripping off
 original file extension and searching for alternative filenames in the
-order specified by `r_texture_formats` variable. Default value is 1
-(enabled).
+order specified by `r_texture_formats` variable. Default value is 1.
+    - 0 — don't override textures
+    - 1 — override only palettized textures
+    - 2 — override all textures
 
 #### `r_texture_formats`
 Specifies the order in which truecolor texture replacements are searched.
 Default value is "pjt", which means to try ‘.png’ extension first, then
 ‘.jpg’, then ‘.tga’.
+
+#### `r_texture_overrides`
+Specifies what types of textures are affected by `r_override_textures`.
+This variable is a bitmask. Default value is -1 (all types).
+    - 1 — HUD pictures
+    - 2 — HUD fonts
+    - 4 — skins
+    - 8 — sprites
+    - 16 — wall textures
+    - 32 — sky textures
 
 #### `vid_gamma`
 Gamma setting for the OpenGL renderer. The RTX renderer uses a more 
@@ -1255,6 +1354,11 @@ Default value is 1.
 #### `allow_download_textures`
 Enables automatic downloading of map textures. Default value is 1.
 
+##### Ignoring downloads
+It is possible to specify a list of paths in `download-ignores.txt` file that
+are known to be non-existent and should never be downloaded from server. This
+file accepts wildcard patterns one per line. Empty lines and lines starting
+with `#` or `/`s characters are ignored.
 
 ### HTTP Downloads
 
@@ -1395,6 +1499,23 @@ This will not affect model-based TDM gameplay, since any male skin will be
 replaced by `male/grunt` and any female skin will be replaced by
 `female/athena`.
 
+#### `cl_ignore_stufftext`
+Enable filtering of commands server is allowed to stuff into client
+console. List of allowed wildcard patterns can be specified in
+`stufftext-whitelist.txt` file. Commands are matched raw, before macro
+expansion, but after splitting multi-line or semicolon separated commands.
+Internal client commands are always allowed. If whitelist file doesn't
+exist or is empty, `cmd` command (with arbitrary arguments) is allowed.
+This allows the server to query any console variable on the client. If
+there is at least one entry in whitelist, then `cmd` needs to be explicitly
+whitelisted. Q2PRO server will not allow the client in if it can't query
+version cvar, for example. When set to 2 and higher also issues a warning
+when stufftext command is ignored. Default value is 0 (don't filter
+stufftext commands).
+
+*NOTE*: Stufftext filtering is advanced feature and may create compatibility
+problems with mods/servers.
+
 #### `cl_rollhack`
 Default OpenGL renderer in Quake 2 contained a bug that caused `roll` angle
 of 3D models to be inverted during rotation.  Due to this bug, player
@@ -1421,6 +1542,11 @@ demo packet sizes.
 #### `cl_demowait`
 Specifies if demo playback is automatically paused at the last frame in
 demo file. Default value is 0 (finish playback).
+
+#### `cl_demosuspendtoggle`
+Specifies if ‘suspend’ both pauses and resumes demo recording or just
+pauses if it was recoring. Default value is 1 (toggle between pause and
+resume).
 
 #### `cl_autopause`
 Specifies if single player game or demo playback is automatically paused
@@ -1505,6 +1631,20 @@ enable the remote console for game or renderer configuration with external
 tools, for example [korgi](https://github.com/NVIDIA/korgi). When `backdoor`
 is enabled, also set `rcon_password` to be nonempty. Default value is 0.
 
+#### `uf`
+User flags variable, automatically exported to game mod in userinfo.
+Meaning and level of support of individual flags is game mod dependent.
+Default value is empty. Commonly supported flags are reproduced below.
+Flags 4 and 64 are supported during local demo playback. Flags 4-64 are
+supported in MVD/GTV client mode.
+  - 1 — auto screenshot at end of match
+  - 2 — auto record demo at beginning of match
+  - 4 — prefer user FOV over chased player FOV
+  - 8 — mute player chat
+  - 16 — mute observer chat
+  - 32 — mute other messages
+  - 64 — prefer chased player FOV over user FOV
+
 
 Macros
 ------
@@ -1582,11 +1722,12 @@ root of quake file system. Can be used to launch MVD playback as well, if
 MVD file type is detected, it will be automatically passed to the server
 subsystem. To stop demo playback, type `disconnect`.
 
-#### `seek [+-]<timespec>`
+#### `seek [+-]<timespec|percent>[%]`
 Seeks the given amount of time during demo playback.  Prepend with `+` to
 seek forward relative to current position, prepend with `-` to seek
 backward relative to current position. Without prefix, seeks to an absolute
-position within the demo file. See below for _timespec_ syntax description.
+frame position within the demo file.  See below for _timespec_ syntax
+description.  With `%` suffix, seeks to specified file position percentage.
 Initial forward seek may be slow, so be patient.
 
 *NOTE*: The `seek` command actually operates on demo frame numbers, not pure
@@ -1626,16 +1767,20 @@ Stops demo recording and prints some statistics about recorded demo.
 Pauses and resumes demo recording.
 
 #### Demo packet sizes
-Packet size options limit maximum demo message size and thus define
-compatibility level of the recorded demo. Original Quake 2 supports just 1390
-bytes (`standard` size), while Q2PRO and R1Q2 support message sizes up to 4086
-bytes (`extended` size). When Q2PRO or R1Q2 protocols are in use, demo written
-to disk is automatically downgraded to protocol 34. This can result in dropping
-of large frames that don't fit into standard protocol 34 limit.  Demo packet
-size can be extended to overcome this, but the resulting demo will be playable
-only by Q2PRO and R1Q2 clients and will be incompatible with other Quake 2
-clients or demo editing tools. By default, `standard` packet size is used. This
-default can be changed using `cl_demomsglen` cvar.
+When Q2PRO or R1Q2 protocols are in use, demo written to disk is automatically
+downgraded to protocol 34. This can result in dropping of large frames that
+don't fit into standard protocol 34 limit. Demo packet size can be extended to
+overcome this, but this may render demo unplayable by other Quake 2 clients
+or demo editing tools. See the table below for demo packet sizes supported by
+different clients. By default, `standard` packet size (1390 bytes) is used.
+This default can be changed using `cl_demomsglen` cvar, or can be overridden
+per demo by `record` command options.
+
+| Client  | Maximum supported demo packet size |
+| ------- | ---------------------------------- |
+| Quake 2 | 1390                               |
+| R1Q2    | 4086                               |
+| Q2PRO   | 32768                              |
 
 
 ### Cvar Operations
@@ -1653,7 +1798,7 @@ If _value_ is omitted, subtract 1 from the value of _cvar_.
 Otherwise, subtract the specified floating point _value_.
 
 #### `reset <cvar>`
-Reset the specified _cvar_ to it's default value.
+Reset the specified _cvar_ to its default value.
 
 #### `resetall`
 Resets all cvars to their default values.
@@ -1677,10 +1822,11 @@ flag. _Value_ may be composed from multiple tokens.
 Sets the specified _cvar_ to _value_, and marks the cvar with `archive`
 flag. _Value_ may be composed from multiple tokens.
 
-#### `cvarlist [-achlmnrstuvw:]`
+#### `cvarlist [-achlmnrstuv:] [wildcard]`
 Display the list of registered cvars and their current values with
 filtering by cvar name or by cvar flags. If no options are given,
-all cvars are listed. Supported options are reproduced below.
+all cvars are listed. Optional _wildcard_ argument filters cvars by name.
+Supported options are reproduced below.
 
 * `-a` or `--archive`: list archived cvars
 * `-c` or `--cheat`: list cheat protected cvars
@@ -1693,7 +1839,6 @@ all cvars are listed. Supported options are reproduced below.
 * `-t` or `--custom`: list user-created cvars
 * `-u` or `--userinfo`: list userinfo cvars
 * `-v` or `--verbose`: display flags of each cvar
-* `-w` or `--wildcard=<string>`: list cvars matching wildcard `string`
 
 #### `macrolist`
 Display the list of registered macros and their current values.
@@ -1774,7 +1919,8 @@ screen. Specify `all` to remove all objects.
 Standard command to take a screenshot. If `format` argument is given,
 takes the screenshot in this format. Otherwise, takes in the format
 specified by `gl_screenshot_format` variable. File name is picked up
-automatically from the `screenshots/quakeNNN.EXT` template.
+automatically from template specified by `gl_screenshot_template`
+variable.
 
 #### `screenshotpng [filename] [compression]`
 Takes the screenshot in PNG format. If `filename` argument is given, saves
@@ -1796,19 +1942,16 @@ picked up automatically.
 
 ### Locations
 
-#### `loc_add <name ...>`
-Adds new location with the specified name at current player position.
+#### `loc <add|del|set|list|save>`
+Execute locations editing subcommand. Available subcommands:
+* `add <name>`: Adds new location with the specified _name_ at current player position.
+* `del`: Deletes location closest to player position.
+* `set <name>`: Sets name of location closest to player position to _name_.
+* `list`: Lists all locations.
+* `save [name]`: Saves current location list into `locs/<name>.loc` file.
+If _name_ is omitted, uses current map name.
 
-#### `loc_delete`
-Deletes location closest to player position.
-
-#### `loc_update <name ...>`
-Changes name of location closest to player position.
-
-#### `loc_write`
-Saves current location list into `locs/<mapname>.loc` file.
-
-*NOTE*: Edit locations on a local server and don't forget to execute `loc_write`
+*NOTE*: Edit locations on a local server and don't forget to execute `loc save`
 command once you are finished. Otherwise all changes to location list will be
 lost on map change or disconnect.
 
@@ -1827,10 +1970,9 @@ restart the file system and reload the current level.
 Flush and reload all media registered by the renderer (textures and models).
 Weaker form of `fs_restart`.
 
-*TIP*: In Q2PRO, you don't have to issue `vid_restart` after changing most of the
-settings, a `fs_restart` or `r_reload` usually suffice. This helps to avoid
-main window recreation and changing video modes back and forth, and is much
-faster.
+*TIP*: In Q2PRO, you don't have to issue `vid_restart` after changing graphics
+settings. Changes to console variables are detected, and appropriate subsystem
+is restarted automatically.
 
 #### `passive`
 Toggle passive connection mode. When enabled, client waits for the first
@@ -1851,7 +1993,35 @@ Optional `count` argument specifies how far to go back in message history
 (it should be positive integer).  If `count` is omitted, then the most
 recent IP address is used.
 
-#### `ogg`
+#### `remotemode <address> <password>`
+Put client console into rcon mode. All commands entered will be forwarded
+to remove server. Press Ctrl+D or close console to exit this mode.
+
+#### `ogg <info|play|stop>`
+Execute OGG subcommand. Available subcommands:
+- `info`:
+    Display information about currently playing background music track.
+- `play <track>`:
+    Start playing background music track number `<track>`.
+- `stop`:
+    Stop playing background music track.
+
+#### `whereis <path> [all]`
+Search for _path_ and print the name of packfile or directory where it is
+found. If _all_ is specified, prints all found instances of path, not just
+the first one.
+
+#### `softlink <name> <target>`
+Create soft symbolic link to _target_ with the specified _name_. Soft
+symbolic links are only effective when _name_ was not found as regular
+file.
+
+#### `softunlink [-ah] <name>`
+Deletes soft symbolic link with the specified _name_, or all soft symbolic
+links. Supported options are reproduced below.
+* `-a` or `--all`: delete all links
+* `-h` or `--help`: display help message
+
 
 ### Renderer
 
@@ -1870,28 +2040,11 @@ this reload, specifically the direct lighting information will not be
 recomputed on reload. Also, sometimes texture coordinates break after 
 reloading the textures and then switching maps - in that case, restart the game.
 
-#### `reload_materials`
-Reloads the materials from the `materials.csv` file within the game file system.
-Modified textures, if any, are also reloaded. Note that changing material types,
-for example from regular to glass, require a map reload or a `vid_restart`.
-
-#### `save_materials`
-Saves the current runtime version of the materials into the `materials.csv` file.
-
-#### `set_material <parameter> <value>`
-Modifies a certain aspect of the material pointed at by the crosshair. Available 
-parameters are:
-
-- `bump_scale` - scaler for the normal map
-- `roughness_override` - minimum roughness
-- `specular_scale` - scaler for the metalness
-- `emissive_scale` - scaler for the emissive map
-- `kind` - material kind, one of `CHROME`, `GLASS`, `WATER`, `LAVA`, `SKY`, `SLIME`, `INVISIBLE`, `SCREEN`, `CAMERA`
-- `light_flag` - flag that controls if the objects with this material are regular objects (0), analytic lights (1) or analytic lights that ignore the light styles (2)
-- `correct_albedo_flag` - flag that enables nonlinear (de-gamma) correction of the albedo map for this material
-
-#### `print_material`
-Prints the information about the material pointed at by the crosshair.
+#### `mat <command> <arguments...>`
+The `mat` command provides an interface to the engine's material system and allows
+inspecting, modifying and saving the materials. It has multiple sub-commands:
+`help`, `print`, `which`, `save`, and all the material attributes. Use `mat help`
+to get usage information.
 
 #### `show_pvs`
 Applies color coding to the map geometry that shows the surfaces within the same
@@ -1923,6 +2076,10 @@ it used to be you know where to look. The following list may be incomplete.
   renderers.  Thus, `vid_ref` cvar has been made read-only and exists only for
   informational purpose.
 
+- Q2PRO supports loading system OpenGL library only. Thus, `gl_driver` cvar has
+  been made read-only and exists only for compatibility with tools like
+  Q2Admin.
+
 - Default value of `gl_dynamic` variable has been changed from 1 to 2. This means
   dynamic lights will be disabled by default.
 
@@ -1936,7 +2093,7 @@ it used to be you know where to look. The following list may be incomplete.
 - `gl_particle_*` series of variables are gone, as well as
   `gl_ext_pointparameters` and R1GL-specific `gl_ext_point_sprite`. For
   controlling size of particles, which are always drawn as textured triangles,
-  Q2PRO supports it's own `gl_partscale` variable.
+  Q2PRO supports its own `gl_partscale` variable.
 
 - `ip` variable has been renamed to `net_ip`.
 

@@ -50,6 +50,8 @@ get_memory_type(uint32_t mem_req_type_bits, VkMemoryPropertyFlags mem_prop)
 				return i;
 		}
 	}
+
+	Com_WPrintf("get_memory_type: cannot find a memory type with propertyFlags = 0x%x\n", mem_prop);
 	return 0;
 }
 
@@ -63,9 +65,6 @@ buffer_create(
 	assert(size > 0);
 	assert(buf);
 	VkResult result = VK_SUCCESS;
-
-	if (!qvk.use_khr_ray_tracing)
-		usage &= ~VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 	VkBufferCreateInfo buf_create_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -148,10 +147,10 @@ VkResult
 buffer_destroy(BufferResource_t *buf)
 {
 	assert(!buf->is_mapped);
+	if (buf->buffer != VK_NULL_HANDLE)
+		vkDestroyBuffer(qvk.device, buf->buffer, NULL);
 	if(buf->memory != VK_NULL_HANDLE)
 		vkFreeMemory(qvk.device, buf->memory, NULL);
-	if(buf->buffer != VK_NULL_HANDLE)
-		vkDestroyBuffer(qvk.device, buf->buffer, NULL);
 	buf->buffer = VK_NULL_HANDLE;
 	buf->memory = VK_NULL_HANDLE;
 	buf->size   = 0;
@@ -178,6 +177,12 @@ buffer_unmap(BufferResource_t *buf)
 	assert(buf->is_mapped);
 	buf->is_mapped = 0;
 	vkUnmapMemory(qvk.device, buf->memory);
+}
+
+void buffer_attach_name(const BufferResource_t *buf, const char *name)
+{
+	ATTACH_LABEL_VARIABLE_NAME(buf->buffer, BUFFER, name);
+	ATTACH_LABEL_VARIABLE_NAME(buf->memory, DEVICE_MEMORY, name);
 }
 
 VkDeviceAddress

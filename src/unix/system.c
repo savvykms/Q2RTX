@@ -31,6 +31,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/mman.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -39,10 +40,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <errno.h>
 
 #if USE_CLIENT
-#include <SDL_video.h>
-#include <SDL_messagebox.h>
+#include <SDL2/SDL_video.h>
+#include <SDL2/SDL_messagebox.h>
+#include <SDL2/SDL.h>
 
-extern SDL_Window *sdl_window;
+extern SDL_Window *get_sdl_window(void);
+
+#include <pthread.h>
 #endif
 
 static char baseDirectory[PATH_MAX];
@@ -51,7 +55,10 @@ cvar_t  *sys_libdir;
 cvar_t  *sys_homedir;
 cvar_t  *sys_forcegamelib;
 
-static qboolean terminate;
+extern cvar_t   *console_prefix;
+
+static bool terminate;
+static bool flush_logs;
 
 /*
 ===============================================================================
@@ -68,12 +75,9 @@ void Sys_DebugBreak(void)
 
 unsigned Sys_Milliseconds(void)
 {
-    struct timeval tp;
-    unsigned time;
-
-    gettimeofday(&tp, NULL);
-    time = tp.tv_sec * 1000 + tp.tv_usec / 1000;
-    return time;
+    struct timespec ts;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000UL + ts.tv_nsec / 1000000UL;
 }
 
 /*
@@ -86,6 +90,9 @@ This function never returns.
 void Sys_Quit(void)
 {
     tty_shutdown_input();
+#if USE_SDL
+    SDL_Quit();
+#endif
     exit(EXIT_SUCCESS);
 }
 
@@ -94,28 +101,18 @@ void Sys_Quit(void)
 void Sys_AddDefaultConfig(void)
 {
     FILE *fp;
-    struct stat st;
-    size_t len, r;
+    size_t len;
 
     fp = fopen(SYS_SITE_CFG, "r");
     if (!fp) {
         return;
     }
 
-    if (fstat(fileno(fp), &st) == 0) {
-        len = st.st_size;
-        if (len >= cmd_buffer.maxsize) {
-            len = cmd_buffer.maxsize - 1;
-        }
-
-        r = fread(cmd_buffer.text, 1, len, fp);
-        cmd_buffer.text[r] = 0;
-
-        cmd_buffer.cursize = COM_Compress(cmd_buffer.text);
-    }
-
+    len = fread(cmd_buffer.text, 1, cmd_buffer.maxsize - 1, fp);
     fclose(fp);
 
+    cmd_buffer.text[len] = 0;
+    cmd_buffer.cursize = COM_Compress(cmd_buffer.text);
     if (cmd_buffer.cursize) {
         Com_Printf("Execing %s\n", SYS_SITE_CFG);
         Cbuf_Execute(&cmd_buffer);
@@ -124,55 +121,63 @@ void Sys_AddDefaultConfig(void)
 
 void Sys_Sleep(int msec)
 {
-    struct timespec req;
-
-    req.tv_sec = msec / 1000;
-    req.tv_nsec = (msec % 1000) * 1000000;
+    struct timespec req = {
+        .tv_sec = msec / 1000,
+        .tv_nsec = (msec % 1000) * 1000000
+    };
     nanosleep(&req, NULL);
 }
 
+const char *Sys_ErrorString(int err)
+{
+    return strerror(err);
+}
+
 #if USE_AC_CLIENT
-qboolean Sys_GetAntiCheatAPI(void)
+bool Sys_GetAntiCheatAPI(void)
 {
     Sys_Sleep(1500);
-    return qfalse;
+    return false;
 }
 #endif
 
-static void hup_handler(int signum)
+bool Sys_SetNonBlock(int fd, bool nb)
 {
-    Com_FlushLogs();
+    int ret = fcntl(fd, F_GETFL, 0);
+    if (ret == -1)
+        return false;
+    if ((bool)(ret & O_NONBLOCK) == nb)
+        return true;
+    return fcntl(fd, F_SETFL, ret ^ O_NONBLOCK) == 0;
+}
+
+static void usr1_handler(int signum)
+{
+    flush_logs = true;
 }
 
 static void term_handler(int signum)
 {
-#ifdef _GNU_SOURCE
     Com_Printf("%s\n", strsignal(signum));
-#else
-    Com_Printf("Received signal %d, exiting\n", signum);
-#endif
 
-    terminate = qtrue;
+    terminate = true;
 }
 
 static void kill_handler(int signum)
 {
     tty_shutdown_input();
 
-#if USE_CLIENT && USE_REF && !USE_X11
-    VID_FatalShutdown();
+#if USE_REF
+    if (vid.fatal_shutdown)
+        vid.fatal_shutdown();
 #endif
 
-#ifdef _GNU_SOURCE
     fprintf(stderr, "%s\n", strsignal(signum));
-#else
-    fprintf(stderr, "Received signal %d, aborting\n", signum);
-#endif
 
     exit(EXIT_FAILURE);
 }
 
-qboolean
+bool
 Sys_IsDir(const char *path)
 {
 	struct stat sb;
@@ -181,14 +186,14 @@ Sys_IsDir(const char *path)
 	{
 		if (S_ISDIR(sb.st_mode))
 		{
-			return qtrue;
+			return true;
 		}
 	}
 
-	return qfalse;
+	return false;
 }
 
-qboolean
+bool
 Sys_IsFile(const char *path)
 {
 	struct stat sb;
@@ -197,11 +202,11 @@ Sys_IsFile(const char *path)
 	{
 		if (S_ISREG(sb.st_mode))
 		{
-			return qtrue;
+			return true;
 		}
 	}
 
-	return qfalse;
+	return false;
 }
 
 /*
@@ -211,8 +216,10 @@ Sys_Init
 */
 void Sys_Init(void)
 {
-    char    *homedir;
+    const char *homedir;
+    char    *xdg_data_home_dir;
     char     homegamedir[PATH_MAX];
+    int      check_snprintf;
     cvar_t  *sys_parachute;
     DIR     *dir_hnd;
 
@@ -220,7 +227,9 @@ void Sys_Init(void)
     signal(SIGINT, term_handler);
     signal(SIGTTIN, SIG_IGN);
     signal(SIGTTOU, SIG_IGN);
-    signal(SIGUSR1, hup_handler);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGHUP, term_handler);
+    signal(SIGUSR1, usr1_handler);
 
     // Check for a full-install before searching local dirs
     sprintf(baseDirectory, "%s", "/usr/share/quake2rtx");
@@ -231,8 +240,8 @@ void Sys_Init(void)
         getcwd(baseDirectory, PATH_MAX);
     }
 
-    if (!baseDirectory) {
-	Sys_Error("Game basedir not found!\n");
+    if (!baseDirectory[0]) {
+        Sys_Error("Game basedir not found!\n");
     }
     // basedir <path>
     // allows the game to run from outside the data tree
@@ -242,19 +251,43 @@ void Sys_Init(void)
     // specifies per-user writable directory for demos, screenshots, etc
     homedir = getenv("HOME");
     if (!homedir) {
-	Sys_Error("Homedir not found!\n");
+        Sys_Error("Homedir not found!\n");
     }
-    sprintf(homegamedir, "%s/%s", homedir, ".quake2rtx");
+    // Attempt to respect user's XDG_DATA_HOME environment variable
+    xdg_data_home_dir = getenv("XDG_DATA_HOME");
+    bool xdg_data_home_dir_allocated = false;
+    if (!xdg_data_home_dir) {
+        size_t xdg_unset_len = strlen(homedir) + strlen("/.local/share") + 1;
+
+        xdg_data_home_dir = malloc(xdg_unset_len);
+        xdg_data_home_dir_allocated = true;
+
+        if (xdg_data_home_dir == NULL) {
+            Sys_Error("%s:xdg_data_home_dir: malloc() failed.\n", __func__);
+        }
+        check_snprintf = snprintf(xdg_data_home_dir, xdg_unset_len,
+            "%s/%s", homedir, ".local/share");
+            if (check_snprintf < 0) {
+                Sys_Error("xdg_data_home_dir: XDG_DATA_HOME not set, and "
+                    "storing the default path (${HOME}/.local/share) "
+                    "failed.\n");
+        }
+    }
+    check_snprintf = snprintf(homegamedir, sizeof(homegamedir),
+            "%s/%s", xdg_data_home_dir, "quake2rtx");
+
+    if (xdg_data_home_dir_allocated)
+        free(xdg_data_home_dir);
+
+    if (check_snprintf < 0) {
+            Sys_Error("%s:homegamedir: snprintf() failed with return "
+                    "value %d.\n", __func__, check_snprintf);
+    }
+    if (strlen(homegamedir) >= MAX_OSPATH - MAX_QPATH)
+        Sys_Error("HOME path too long");
     sys_homedir = Cvar_Get("homedir", homegamedir, CVAR_NOSET);
     sys_libdir = Cvar_Get("libdir", baseDirectory, CVAR_NOSET);
     sys_forcegamelib = Cvar_Get("sys_forcegamelib", "", CVAR_NOSET);
-
-    if (tty_init_input()) {
-        signal(SIGHUP, term_handler);
-    } else if (COM_DEDICATED) {
-        signal(SIGHUP, hup_handler);
-    }
-
     sys_parachute = Cvar_Get("sys_parachute", "1", CVAR_NOSET);
 
     if (sys_parachute->integer) {
@@ -264,6 +297,8 @@ void Sys_Init(void)
         signal(SIGFPE, kill_handler);
         signal(SIGTRAP, kill_handler);
     }
+
+    tty_init_input();
 }
 
 /*
@@ -275,6 +310,7 @@ void Sys_Error(const char *error, ...)
 {
     va_list     argptr;
     char        text[MAXERRORMSG];
+    const char  *pre = "";
 
     tty_shutdown_input();
 
@@ -287,17 +323,21 @@ void Sys_Error(const char *error, ...)
 		    SDL_MESSAGEBOX_ERROR,
 		    PRODUCT " Fatal Error",
 		    text,
-		    sdl_window);
+		    get_sdl_window());
 #endif
 
-#if USE_CLIENT && USE_REF
-    VID_FatalShutdown();
+#if USE_REF
+    if (vid.fatal_shutdown)
+        vid.fatal_shutdown();
 #endif
+
+    if (console_prefix && !strncmp(console_prefix->string, "<?>", 3))
+        pre = "<3>";
 
     fprintf(stderr,
-            "********************\n"
-            "FATAL: %s\n"
-            "********************\n", text);
+            "%s********************\n"
+            "%sFATAL: %s\n"
+            "%s********************\n", pre, pre, text, pre);
     exit(EXIT_FAILURE);
 }
 
@@ -378,27 +418,15 @@ MISC
 /*
 =================
 Sys_ListFiles_r
-
-Internal function to filesystem. Conventions apply:
-    - files should hold at least MAX_LISTED_FILES
-    - *count_p must be initialized in range [0, MAX_LISTED_FILES - 1]
-    - depth must be 0 on the first call
 =================
 */
-void Sys_ListFiles_r(const char  *path,
-                     const char  *filter,
-                     unsigned    flags,
-                     size_t      baselen,
-                     int         *count_p,
-                     void        **files,
-                     int         depth)
+void Sys_ListFiles_r(listfiles_t *list, const char *path, int depth)
 {
     struct dirent *ent;
     DIR *dir;
     struct stat st;
     char fullpath[MAX_OSPATH];
     char *name;
-    size_t len;
     void *info;
 
     if ((dir = opendir(path)) == NULL) {
@@ -410,9 +438,8 @@ void Sys_ListFiles_r(const char  *path,
             continue; // ignore dotfiles
         }
 
-        len = Q_concat(fullpath, sizeof(fullpath),
-                       path, "/", ent->d_name, NULL);
-        if (len >= sizeof(fullpath)) {
+        if (Q_concat(fullpath, sizeof(fullpath), path, "/",
+                     ent->d_name) >= sizeof(fullpath)) {
             continue;
         }
 
@@ -420,7 +447,7 @@ void Sys_ListFiles_r(const char  *path,
 
 #ifdef _DIRENT_HAVE_D_TYPE
         // try to avoid stat() if possible
-        if (!(flags & FS_SEARCH_EXTRAINFO)
+        if (!(list->flags & FS_SEARCH_EXTRAINFO)
             && ent->d_type != DT_UNKNOWN
             && ent->d_type != DT_LNK) {
             st.st_mode = DTTOIF(ent->d_type);
@@ -432,19 +459,18 @@ void Sys_ListFiles_r(const char  *path,
         }
 
         // pattern search implies recursive search
-        if ((flags & FS_SEARCH_BYFILTER) &&
-            S_ISDIR(st.st_mode) && depth < MAX_LISTED_DEPTH) {
-            Sys_ListFiles_r(fullpath, filter, flags, baselen,
-                            count_p, files, depth + 1);
+        if ((list->flags & (FS_SEARCH_BYFILTER | FS_SEARCH_RECURSIVE))
+            && S_ISDIR(st.st_mode) && depth < MAX_LISTED_DEPTH) {
+            Sys_ListFiles_r(list, fullpath, depth + 1);
 
             // re-check count
-            if (*count_p >= MAX_LISTED_FILES) {
+            if (list->count >= MAX_LISTED_FILES) {
                 break;
             }
         }
 
         // check type
-        if (flags & FS_SEARCH_DIRSONLY) {
+        if (list->flags & FS_SEARCH_DIRSONLY) {
             if (!S_ISDIR(st.st_mode)) {
                 continue;
             }
@@ -455,27 +481,27 @@ void Sys_ListFiles_r(const char  *path,
         }
 
         // check filter
-        if (filter) {
-            if (flags & FS_SEARCH_BYFILTER) {
-                if (!FS_WildCmp(filter, fullpath + baselen)) {
+        if (list->filter) {
+            if (list->flags & FS_SEARCH_BYFILTER) {
+                if (!FS_WildCmp(list->filter, fullpath + list->baselen)) {
                     continue;
                 }
             } else {
-                if (!FS_ExtCmp(filter, ent->d_name)) {
+                if (!FS_ExtCmp(list->filter, ent->d_name)) {
                     continue;
                 }
             }
         }
 
         // strip path
-        if (flags & FS_SEARCH_SAVEPATH) {
-            name = fullpath + baselen;
+        if (list->flags & FS_SEARCH_SAVEPATH) {
+            name = fullpath + list->baselen;
         } else {
             name = ent->d_name;
         }
 
         // strip extension
-        if (flags & FS_SEARCH_STRIPEXT) {
+        if (list->flags & FS_SEARCH_STRIPEXT) {
             *COM_FileExtension(name) = 0;
 
             if (!*name) {
@@ -484,7 +510,7 @@ void Sys_ListFiles_r(const char  *path,
         }
 
         // copy info off
-        if (flags & FS_SEARCH_EXTRAINFO) {
+        if (list->flags & FS_SEARCH_EXTRAINFO) {
             info = FS_CopyInfo(name,
                                st.st_size,
                                st.st_ctime,
@@ -493,9 +519,10 @@ void Sys_ListFiles_r(const char  *path,
             info = FS_CopyString(name);
         }
 
-        files[(*count_p)++] = info;
+        list->files = FS_ReallocList(list->files, list->count + 1);
+        list->files[list->count++] = info;
 
-        if (*count_p >= MAX_LISTED_FILES) {
+        if (list->count >= MAX_LISTED_FILES) {
             break;
         }
     }
@@ -529,6 +556,10 @@ int main(int argc, char **argv)
 
     Qcommon_Init(argc, argv);
     while (!terminate) {
+        if (flush_logs) {
+            Com_FlushLogs();
+            flush_logs = false;
+        }
         Qcommon_Frame();
     }
 

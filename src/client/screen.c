@@ -24,7 +24,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define STAT_MINUS      (STAT_PICS - 1)  // num frame for '-' stats digit
 
 static struct {
-    qboolean    initialized;        // ready to draw
+    bool        initialized;        // ready to draw
 
     qhandle_t   crosshair_pic;
     int         crosshair_width, crosshair_height;
@@ -35,7 +35,7 @@ static struct {
 
     qhandle_t   loading_pic;
     int         loading_width, loading_height;
-    qboolean    draw_loading;
+    bool        draw_loading;
 
     qhandle_t   sb_pics[2][STAT_PICS];
     qhandle_t   inven_pic;
@@ -54,7 +54,7 @@ static struct {
 cvar_t   *scr_viewsize;
 static cvar_t   *scr_centertime;
 static cvar_t   *scr_showpause;
-#ifdef _DEBUG
+#if USE_DEBUG
 static cvar_t   *scr_showstats;
 static cvar_t   *scr_showpmove;
 #endif
@@ -92,28 +92,7 @@ static cvar_t   *ch_scale;
 static cvar_t   *ch_x;
 static cvar_t   *ch_y;
 
-#ifdef _DEBUG
-cvar_t      *scr_netgraph;
-cvar_t      *scr_timegraph;
-cvar_t      *scr_debuggraph;
-
-static cvar_t   *scr_graphheight;
-static cvar_t   *scr_graphscale;
-static cvar_t   *scr_graphshift;
-#endif
-
 vrect_t     scr_vrect;      // position of render window on screen
-
-static const char *const sb_nums[2][STAT_PICS] = {
-    {
-        "num_0", "num_1", "num_2", "num_3", "num_4", "num_5",
-        "num_6", "num_7", "num_8", "num_9", "num_minus"
-    },
-    {
-        "anum_0", "anum_1", "anum_2", "anum_3", "anum_4", "anum_5",
-        "anum_6", "anum_7", "anum_8", "anum_9", "anum_minus"
-    }
-};
 
 const uint32_t colorTable[8] = {
     U32_BLACK, U32_RED, U32_GREEN, U32_YELLOW,
@@ -212,7 +191,7 @@ float SCR_FadeAlpha(unsigned startTime, unsigned visTime, unsigned fadeTime)
     return alpha;
 }
 
-qboolean SCR_ParseColor(const char *s, color_t *color)
+bool SCR_ParseColor(const char *s, color_t *color)
 {
     int i;
     int c[8];
@@ -222,11 +201,11 @@ qboolean SCR_ParseColor(const char *s, color_t *color)
         s++;
         for (i = 0; s[i]; i++) {
             if (i == 8) {
-                return qfalse;
+                return false;
             }
             c[i] = Q_charhex(s[i]);
             if (c[i] == -1) {
-                return qfalse;
+                return false;
             }
         }
 
@@ -250,20 +229,20 @@ qboolean SCR_ParseColor(const char *s, color_t *color)
             color->u8[3] = c[7] | (c[6] << 4);
             break;
         default:
-            return qfalse;
+            return false;
         }
 
-        return qtrue;
+        return true;
     }
 
     // parse name or index
-    i = Com_ParseColor(s, COLOR_WHITE);
-    if (i == COLOR_NONE) {
-        return qfalse;
+    i = Com_ParseColor(s);
+    if (i >= q_countof(colorTable)) {
+        return false;
     }
 
     color->u32 = colorTable[i];
-    return qtrue;
+    return true;
 }
 
 /*
@@ -274,135 +253,49 @@ BAR GRAPHS
 ===============================================================================
 */
 
-#ifdef _DEBUG
-/*
-==============
-CL_AddNetgraph
-
-A new packet was just parsed
-==============
-*/
-void CL_AddNetgraph(void)
-{
-    int     i;
-    int     in;
-    int     ping;
-
-    if (!scr.initialized)
-        return;
-
-    // if using the debuggraph for something else, don't
-    // add the net lines
-    if (scr_debuggraph->integer || scr_timegraph->integer)
-        return;
-
-    for (i = 0; i < cls.netchan->dropped; i++)
-        SCR_DebugGraph(30, 0x40);
-
-    //for (i=0; i<cl.suppressCount; i++)
-    //  SCR_DebugGraph (30, 0xdf);
-
-    // see what the latency was on this packet
-    in = cls.netchan->incoming_acknowledged & CMD_MASK;
-    ping = cls.realtime - cl.history[in].sent;
-    ping /= 30;
-    if (ping > 30)
-        ping = 30;
-    SCR_DebugGraph(ping, 0xd0);
-}
-
-
-typedef struct {
-    float   value;
-    int     color;
-} graphsamp_t;
-
-static  int         current;
-static  graphsamp_t values[2048];
-
-/*
-==============
-SCR_DebugGraph
-==============
-*/
-void SCR_DebugGraph(float value, int color)
-{
-    values[current & 2047].value = value;
-    values[current & 2047].color = color;
-    current++;
-}
-
-/*
-==============
-SCR_DrawDebugGraph
-==============
-*/
-static void SCR_DrawDebugGraph(void)
-{
-    int     a, x, y, w, i, h;
-    float   v;
-    int     color;
-
-    //
-    // draw the graph
-    //
-    w = r_config.width;
-
-    x = w - 1;
-    y = r_config.height;
-    R_DrawFill8(x, y - scr_graphheight->value,
-                w, scr_graphheight->value, 8);
-
-    for (a = 0; a < w; a++) {
-        i = (current - 1 - a + 2048) & 2047;
-        v = values[i].value;
-        color = values[i].color;
-        v = v * scr_graphscale->value + scr_graphshift->value;
-
-        if (v < 0)
-            v += scr_graphheight->value * (1 + (int)(-v / scr_graphheight->value));
-        h = (int)v % (int)scr_graphheight->value;
-        R_DrawFill8(x, y - h, 1,    h, color);
-        x--;
-    }
-}
-#endif
-
-static void draw_percent_bar(int percent, qboolean paused, int framenum)
+static void draw_progress_bar(float progress, bool paused, int framenum)
 {
     char buffer[16];
-    int x, w;
+    int x, w, h;
     size_t len;
 
-    scr.hud_height -= CHAR_HEIGHT;
+    w = Q_rint(scr.hud_width * progress);
+    h = Q_rint(CHAR_HEIGHT / scr.hud_scale);
 
-    w = scr.hud_width * percent / 100;
+    scr.hud_height -= h;
 
-    R_DrawFill8(0, scr.hud_height, w, CHAR_HEIGHT, 4);
-    R_DrawFill8(w, scr.hud_height, scr.hud_width - w, CHAR_HEIGHT, 0);
+    R_DrawFill8(0, scr.hud_height, w, h, 4);
+    R_DrawFill8(w, scr.hud_height, scr.hud_width - w, h, 0);
 
-    len = Q_scnprintf(buffer, sizeof(buffer), "%d%%", percent);
-    x = (scr.hud_width - len * CHAR_WIDTH) / 2;
-    R_DrawString(x, scr.hud_height, 0, MAX_STRING_CHARS, buffer, scr.font_pic);
+    R_SetScale(scr.hud_scale);
+
+    w = Q_rint(scr.hud_width * scr.hud_scale);
+    h = Q_rint(scr.hud_height * scr.hud_scale);
+
+    len = Q_scnprintf(buffer, sizeof(buffer), "%.f%%", progress * 100);
+    x = (w - len * CHAR_WIDTH) / 2;
+    R_DrawString(x, h, 0, MAX_STRING_CHARS, buffer, scr.font_pic);
 
     if (scr_demobar->integer > 1) {
         int sec = framenum / 10;
         int min = sec / 60; sec %= 60;
 
         Q_scnprintf(buffer, sizeof(buffer), "%d:%02d.%d", min, sec, framenum % 10);
-        R_DrawString(0, scr.hud_height, 0, MAX_STRING_CHARS, buffer, scr.font_pic);
+        R_DrawString(0, h, 0, MAX_STRING_CHARS, buffer, scr.font_pic);
     }
 
     if (paused) {
-        SCR_DrawString(scr.hud_width, scr.hud_height, UI_RIGHT, "[PAUSED]");
+        SCR_DrawString(w, h, UI_RIGHT, "[PAUSED]");
     }
+
+    R_SetScale(1.0f);
 }
 
 static void SCR_DrawDemo(void)
 {
 #if USE_MVD_CLIENT
-    int percent;
-    qboolean paused;
+    float progress;
+    bool paused;
     int framenum;
 #endif
 
@@ -412,8 +305,8 @@ static void SCR_DrawDemo(void)
 
     if (cls.demo.playback) {
         if (cls.demo.file_size) {
-            draw_percent_bar(
-                cls.demo.file_percent,
+            draw_progress_bar(
+                cls.demo.file_progress,
                 sv_paused->integer &&
                 cl_paused->integer &&
                 scr_showpause->integer == 2,
@@ -427,15 +320,15 @@ static void SCR_DrawDemo(void)
         return;
     }
 
-    if ((percent = MVD_GetDemoPercent(&paused, &framenum)) == -1) {
+    if (!MVD_GetDemoStatus(&progress, &paused, &framenum)) {
         return;
     }
 
     if (sv_paused->integer && cl_paused->integer && scr_showpause->integer == 2) {
-        paused |= qtrue;
+        paused = true;
     }
 
-    draw_percent_bar(percent, paused, framenum);
+    draw_progress_bar(progress, paused, framenum);
 #endif
 }
 
@@ -517,8 +410,8 @@ LAGOMETER
 #define LAG_WIDTH   48
 #define LAG_HEIGHT  48
 
-#define LAG_CRIT_BIT    (1 << 31)
-#define LAG_WARN_BIT    (1 << 30)
+#define LAG_WARN_BIT    BIT(30)
+#define LAG_CRIT_BIT    BIT(31)
 
 #define LAG_BASE    0xD5
 #define LAG_WARN    0xDC
@@ -536,7 +429,7 @@ void SCR_LagClear(void)
 
 void SCR_LagSample(void)
 {
-    int i = cls.netchan->incoming_acknowledged & CMD_MASK;
+    int i = cls.netchan.incoming_acknowledged & CMD_MASK;
     client_history_t *h = &cl.history[i];
     unsigned ping;
 
@@ -546,7 +439,7 @@ void SCR_LagSample(void)
     }
 
     ping = h->rcvd - h->sent;
-    for (i = 0; i < cls.netchan->dropped; i++) {
+    for (i = 0; i < cls.netchan.dropped; i++) {
         lag.samples[lag.head % LAG_WIDTH] = ping | LAG_CRIT_BIT;
         lag.head++;
     }
@@ -586,8 +479,7 @@ static void SCR_LagDraw(int x, int y)
         }
 
         v &= ~(LAG_WARN_BIT | LAG_CRIT_BIT);
-        v = (v - v_min) * LAG_HEIGHT / v_range;
-        clamp(v, 0, LAG_HEIGHT);
+        v = Q_clip((v - v_min) * LAG_HEIGHT / v_range, 0, LAG_HEIGHT);
 
         R_DrawFill8(x + LAG_WIDTH - i - 1, y + LAG_HEIGHT - v, 1, v, c);
     }
@@ -614,7 +506,7 @@ static void SCR_DrawNet(void)
     }
 
     // draw phone jack
-    if (cls.netchan && cls.netchan->outgoing_sequence - cls.netchan->incoming_acknowledged >= CMD_BACKUP) {
+    if (cls.netchan.outgoing_sequence - cls.netchan.incoming_acknowledged >= CMD_BACKUP) {
         if ((cls.realtime >> 8) & 3) {
             R_DrawStretchPic(x, y, LAG_WIDTH, LAG_HEIGHT, scr.net_pic);
         }
@@ -650,11 +542,8 @@ static void SCR_Color_g(genctx_t *ctx)
 {
     int color;
 
-    for (color = 0; color < 10; color++) {
-        if (!Prompt_AddMatch(ctx, colorNames[color])) {
-            break;
-        }
-    }
+    for (color = 0; color < COLOR_COUNT; color++)
+        Prompt_AddMatch(ctx, colorNames[color]);
 }
 
 static void SCR_Draw_c(genctx_t *ctx, int argnum)
@@ -702,8 +591,8 @@ static void SCR_Draw_f(void)
     flags = UI_IGNORECOLOR;
 
     s = Cmd_Argv(1);
-    x = atoi(Cmd_Argv(2));
-    y = atoi(Cmd_Argv(3));
+    x = Q_atoi(Cmd_Argv(2));
+    y = Q_atoi(Cmd_Argv(3));
 
     if (x < 0) {
         flags |= UI_RIGHT;
@@ -762,9 +651,7 @@ static void SCR_Draw_g(genctx_t *ctx)
 
     FOR_EACH_DRAWOBJ(obj) {
         s = obj->macro ? obj->macro->name : obj->cvar->name;
-        if (!Prompt_AddMatch(ctx, s)) {
-            break;
-        }
+        Prompt_AddMatch(ctx, s);
     }
 }
 
@@ -850,19 +737,19 @@ static void SCR_DrawObjects(void)
     }
 }
 
-extern int CL_GetFps();
-extern int CL_GetResolutionScale();
+extern int CL_GetFps(void);
+extern int CL_GetResolutionScale(void);
 
 static void SCR_DrawFPS(void)
 {
 	if (scr_fps->integer == 0)
 		return;
 
-	int fps = CL_GetFps();
+	int fps = R_FPS;
 	int scale = CL_GetResolutionScale();
 
 	char buffer[MAX_QPATH];
-	if (scr_fps->integer == 2 && vid_rtx->integer)
+	if (scr_fps->integer == 2 && cls.ref_type == REF_TYPE_VKPT)
 		Q_snprintf(buffer, MAX_QPATH, "%d FPS at %3d%%", fps, scale);
 	else
 		Q_snprintf(buffer, MAX_QPATH, "%d FPS", fps);
@@ -916,8 +803,7 @@ void SCR_AddToChatHUD(const char *text)
 
 static void SCR_DrawChatHUD(void)
 {
-    int x, y, flags, step;
-    unsigned i, lines, time;
+    int x, y, i, lines, flags, step;
     float alpha;
     chatline_t *line;
 
@@ -950,13 +836,11 @@ static void SCR_DrawChatHUD(void)
     if (lines > scr_chathead)
         lines = scr_chathead;
 
-    time = scr_chathud_time->value * 1000;
-
     for (i = 0; i < lines; i++) {
         line = &scr_chatlines[(scr_chathead - i - 1) & CHAT_LINE_MASK];
 
-        if (time) {
-            alpha = SCR_FadeAlpha(line->time, time, 1000);
+        if (scr_chathud_time->integer) {
+            alpha = SCR_FadeAlpha(line->time, scr_chathud_time->integer, 1000);
             if (!alpha)
                 break;
 
@@ -1014,7 +898,7 @@ static void SCR_DrawTurtle(void)
 #undef DF
 }
 
-#ifdef _DEBUG
+#if USE_DEBUG
 
 static void SCR_DrawDebugStats(void)
 {
@@ -1148,18 +1032,18 @@ static void SCR_Sky_f(void)
     }
 
     if (argc > 2)
-        rotate = atof(Cmd_Argv(2));
+        rotate = Q_atof(Cmd_Argv(2));
     else
         rotate = 0;
 
     if (argc == 6) {
-        axis[0] = atof(Cmd_Argv(3));
-        axis[1] = atof(Cmd_Argv(4));
-        axis[2] = atof(Cmd_Argv(5));
+        axis[0] = Q_atof(Cmd_Argv(3));
+        axis[1] = Q_atof(Cmd_Argv(4));
+        axis[2] = Q_atof(Cmd_Argv(5));
     } else
         VectorSet(axis, 0, 0, 1);
 
-    R_SetSky(name, rotate, axis);
+    R_SetSky(name, rotate, 1, axis);
 }
 
 /*
@@ -1229,11 +1113,11 @@ static void scr_crosshair_changed(cvar_t *self)
         if (ch_health->integer) {
             SCR_SetCrosshairColor();
         } else {
-            scr.crosshair_color.u8[0] = (byte)(ch_red->value * 255);
-            scr.crosshair_color.u8[1] = (byte)(ch_green->value * 255);
-            scr.crosshair_color.u8[2] = (byte)(ch_blue->value * 255);
+            scr.crosshair_color.u8[0] = Cvar_ClampValue(ch_red, 0, 1) * 255;
+            scr.crosshair_color.u8[1] = Cvar_ClampValue(ch_green, 0, 1) * 255;
+            scr.crosshair_color.u8[2] = Cvar_ClampValue(ch_blue, 0, 1) * 255;
         }
-        scr.crosshair_color.u8[3] = (byte)(ch_alpha->value * 255);
+        scr.crosshair_color.u8[3] = Cvar_ClampValue(ch_alpha, 0, 1) * 255;
     } else {
         scr.crosshair_pic = 0;
     }
@@ -1280,13 +1164,11 @@ void SCR_ModeChanged(void)
     IN_Activate();
     Con_CheckResize();
     UI_ModeChanged();
-    // video sync flag may have changed
-    CL_UpdateFrameTimes();
     cls.disable_screen = 0;
     if (scr.initialized)
         scr.hud_scale = R_ClampScale(scr_scale);
 
-	scr.hud_alpha = 1.f;
+    scr.hud_alpha = 1.f;
 }
 
 /*
@@ -1296,16 +1178,20 @@ SCR_RegisterMedia
 */
 void SCR_RegisterMedia(void)
 {
-    int     i, j;
+    int     i;
 
-    for (i = 0; i < 2; i++)
-        for (j = 0; j < STAT_PICS; j++)
-            scr.sb_pics[i][j] = R_RegisterPic(sb_nums[i][j]);
+    for (i = 0; i < STAT_MINUS; i++)
+        scr.sb_pics[0][i] = R_RegisterPic(va("num_%d", i));
+    scr.sb_pics[0][i] = R_RegisterPic("num_minus");
+
+    for (i = 0; i < STAT_MINUS; i++)
+        scr.sb_pics[1][i] = R_RegisterPic(va("anum_%d", i));
+    scr.sb_pics[1][i] = R_RegisterPic("anum_minus");
 
     scr.inven_pic = R_RegisterPic("inventory");
     scr.field_pic = R_RegisterPic("field_3");
 
-    scr.backtile_pic = R_RegisterImage("backtile", IT_PIC, IF_PERMANENT | IF_REPEAT, NULL);
+    scr.backtile_pic = R_RegisterImage("backtile", IT_PIC, IF_PERMANENT | IF_REPEAT);
 
     scr.pause_pic = R_RegisterPic("pause");
     R_GetPicSize(&scr.pause_width, &scr.pause_height, scr.pause_pic);
@@ -1350,18 +1236,10 @@ void SCR_Init(void)
     scr_viewsize = Cvar_Get("viewsize", "100", CVAR_ARCHIVE);
     scr_showpause = Cvar_Get("scr_showpause", "1", 0);
     scr_centertime = Cvar_Get("scr_centertime", "2.5", 0);
-#ifdef _DEBUG
-    scr_netgraph = Cvar_Get("netgraph", "0", 0);
-    scr_timegraph = Cvar_Get("timegraph", "0", 0);
-    scr_debuggraph = Cvar_Get("debuggraph", "0", 0);
-    scr_graphheight = Cvar_Get("graphheight", "32", 0);
-    scr_graphscale = Cvar_Get("graphscale", "1", 0);
-    scr_graphshift = Cvar_Get("graphshift", "0", 0);
-#endif
     scr_demobar = Cvar_Get("scr_demobar", "1", 0);
     scr_font = Cvar_Get("scr_font", "conchars", 0);
     scr_font->changed = scr_font_changed;
-    scr_scale = Cvar_Get("scr_scale", "2", 0);
+    scr_scale = Cvar_Get("scr_scale", "0", 0);
     scr_scale->changed = scr_scale_changed;
     scr_crosshair = Cvar_Get("crosshair", "0", CVAR_ARCHIVE);
     scr_crosshair->changed = scr_crosshair_changed;
@@ -1369,6 +1247,8 @@ void SCR_Init(void)
     scr_chathud = Cvar_Get("scr_chathud", "0", 0);
     scr_chathud_lines = Cvar_Get("scr_chathud_lines", "4", 0);
     scr_chathud_time = Cvar_Get("scr_chathud_time", "0", 0);
+    scr_chathud_time->changed = cl_timeout_changed;
+    scr_chathud_time->changed(scr_chathud_time);
     scr_chathud_x = Cvar_Get("scr_chathud_x", "8", 0);
     scr_chathud_y = Cvar_Get("scr_chathud_y", "-64", 0);
 
@@ -1398,7 +1278,7 @@ void SCR_Init(void)
     scr_lag_max = Cvar_Get("scr_lag_max", "200", 0);
 	scr_alpha = Cvar_Get("scr_alpha", "1", 0);
 	scr_fps = Cvar_Get("scr_fps", "0", CVAR_ARCHIVE);
-#ifdef _DEBUG
+#ifdef USE_DEBUG
     scr_showstats = Cvar_Get("scr_showstats", "0", 0);
     scr_showpmove = Cvar_Get("scr_showpmove", "0", 0);
 #endif
@@ -1407,14 +1287,16 @@ void SCR_Init(void)
 
     scr_scale_changed(scr_scale);
 
-    scr.initialized = qtrue;
+    scr.initialized = true;
 }
 
 void SCR_Shutdown(void)
 {
     Cmd_Deregister(scr_cmds);
-    scr.initialized = qfalse;
+    scr.initialized = false;
 }
+
+//=============================================================================
 
 /*
 ================
@@ -1427,11 +1309,14 @@ void SCR_BeginLoadingPlaque(void)
         return;
     }
 
+    S_StopAllSounds();
+    OGG_Stop();
+
     if (cls.disable_screen) {
         return;
     }
 
-#ifdef _DEBUG
+#if USE_DEBUG
     if (developer->integer) {
         return;
     }
@@ -1442,7 +1327,7 @@ void SCR_BeginLoadingPlaque(void)
         return;
     }
 
-    scr.draw_loading = qtrue;
+    scr.draw_loading = true;
     SCR_UpdateScreen();
 
     cls.disable_screen = Sys_Milliseconds();
@@ -1492,6 +1377,12 @@ STAT PROGRAMS
 #define HUD_DrawAltCenterString(x, y, string) \
     SCR_DrawStringMulti(x, y, UI_CENTER | UI_XORCOLOR, MAX_STRING_CHARS, string, scr.font_pic)
 
+#define HUD_DrawRightString(x, y, string) \
+    SCR_DrawStringEx(x, y, UI_RIGHT, MAX_STRING_CHARS, string, scr.font_pic)
+
+#define HUD_DrawAltRightString(x, y, string) \
+    SCR_DrawStringEx(x, y, UI_RIGHT | UI_XORCOLOR, MAX_STRING_CHARS, string, scr.font_pic)
+
 static void HUD_DrawNumber(int x, int y, int color, int width, int value)
 {
     char    num[16], *ptr;
@@ -1535,11 +1426,11 @@ static void SCR_DrawInventory(void)
     int     index[MAX_ITEMS];
     char    string[MAX_STRING_CHARS];
     int     x, y;
-    char    *bind;
+    const char  *bind;
     int     selected;
     int     top;
 
-    if (!(cl.frame.ps.stats[STAT_LAYOUTS] & 2))
+    if (!(cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_INVENTORY))
         return;
 
     selected = cl.frame.ps.stats[STAT_SELECTED_ITEM];
@@ -1580,12 +1471,11 @@ static void SCR_DrawInventory(void)
     for (i = top; i < num && i < top + DISPLAY_ITEMS; i++) {
         item = index[i];
         // search for a binding
-        Q_concat(string, sizeof(string),
-                 "use ", cl.configstrings[CS_ITEMS + item], NULL);
+        Q_concat(string, sizeof(string), "use ", cl.configstrings[cl.csr.items + item]);
         bind = Key_GetBinding(string);
 
         Q_snprintf(string, sizeof(string), "%6s %3i %s",
-                   bind, cl.inventory[item], cl.configstrings[CS_ITEMS + item]);
+                   bind, cl.inventory[item], cl.configstrings[cl.csr.items + item]);
 
         if (item != selected) {
             HUD_DrawAltString(x, y, string);
@@ -1626,11 +1516,77 @@ static void SCR_DrawSelectedItemName(int x, int y, int item)
     {
         R_SetAlpha(alpha * scr_alpha->value);
 
-        int index = CS_ITEMS + item;
+        int index = cl.csr.items + item;
         HUD_DrawString(x, y, cl.configstrings[index]);
 
         R_SetAlpha(scr_alpha->value);
     }
+}
+
+static void SCR_SkipToEndif(const char **s)
+{
+    int i, skip = 1;
+    char *token;
+
+    while (*s) {
+        token = COM_Parse(s);
+        if (!strcmp(token, "xl") || !strcmp(token, "xr") || !strcmp(token, "xv") ||
+            !strcmp(token, "yt") || !strcmp(token, "yb") || !strcmp(token, "yv") ||
+            !strcmp(token, "pic") || !strcmp(token, "picn") || !strcmp(token, "color") ||
+            strstr(token, "string")) {
+            COM_Parse(s);
+            continue;
+        }
+
+        if (!strcmp(token, "client")) {
+            for (i = 0; i < 6; i++)
+                COM_Parse(s);
+            continue;
+        }
+
+        if (!strcmp(token, "ctf")) {
+            for (i = 0; i < 5; i++)
+                COM_Parse(s);
+            continue;
+        }
+
+        if (!strcmp(token, "num") || !strcmp(token, "health_bars")) {
+            COM_Parse(s);
+            COM_Parse(s);
+            continue;
+        }
+
+        if (!strcmp(token, "hnum")) continue;
+        if (!strcmp(token, "anum")) continue;
+        if (!strcmp(token, "rnum")) continue;
+
+        if (!strcmp(token, "if")) {
+            COM_Parse(s);
+            skip++;
+            continue;
+        }
+
+        if (!strcmp(token, "endif")) {
+            if (--skip > 0)
+                continue;
+            return;
+        }
+    }
+}
+
+static void SCR_DrawHealthBar(int x, int y, int value)
+{
+    if (!value)
+        return;
+
+    int bar_width = scr.hud_width / 3;
+    float percent = (value - 1) / 254.0f;
+    int w = bar_width * percent + 0.5f;
+    int h = CHAR_HEIGHT / 2;
+
+    x -= bar_width / 2;
+    R_DrawFill8(x, y, w, h, 240);
+    R_DrawFill8(x + w, y, bar_width - w, h, 4);
 }
 
 static void SCR_ExecuteLayoutString(const char *s)
@@ -1655,19 +1611,19 @@ static void SCR_ExecuteLayoutString(const char *s)
             if (token[0] == 'x') {
                 if (token[1] == 'l') {
                     token = COM_Parse(&s);
-                    x = atoi(token);
+                    x = Q_atoi(token);
                     continue;
                 }
 
                 if (token[1] == 'r') {
                     token = COM_Parse(&s);
-                    x = scr.hud_width + atoi(token);
+                    x = scr.hud_width + Q_atoi(token);
                     continue;
                 }
 
                 if (token[1] == 'v') {
                     token = COM_Parse(&s);
-                    x = scr.hud_width / 2 - 160 + atoi(token);
+                    x = scr.hud_width / 2 - 160 + Q_atoi(token);
                     continue;
                 }
             }
@@ -1675,19 +1631,19 @@ static void SCR_ExecuteLayoutString(const char *s)
             if (token[0] == 'y') {
                 if (token[1] == 't') {
                     token = COM_Parse(&s);
-                    y = atoi(token);
+                    y = Q_atoi(token);
                     continue;
                 }
 
                 if (token[1] == 'b') {
                     token = COM_Parse(&s);
-                    y = scr.hud_height + atoi(token);
+                    y = scr.hud_height + Q_atoi(token);
                     continue;
                 }
 
                 if (token[1] == 'v') {
                     token = COM_Parse(&s);
-                    y = scr.hud_height / 2 - 120 + atoi(token);
+                    y = scr.hud_height / 2 - 120 + Q_atoi(token);
                     continue;
                 }
             }
@@ -1696,17 +1652,32 @@ static void SCR_ExecuteLayoutString(const char *s)
         if (!strcmp(token, "pic")) {
             // draw a pic from a stat number
             token = COM_Parse(&s);
-            value = atoi(token);
+            value = Q_atoi(token);
             if (value < 0 || value >= MAX_STATS) {
                 Com_Error(ERR_DROP, "%s: invalid stat index", __func__);
             }
             index = cl.frame.ps.stats[value];
-            if (index < 0 || index >= MAX_IMAGES) {
+            if (index < 0 || index >= cl.csr.max_images) {
                 Com_Error(ERR_DROP, "%s: invalid pic index", __func__);
             }
-            token = cl.configstrings[CS_IMAGES + index];
-            if (token[0] && cl.image_precache[index]) {
-                R_DrawPic(x, y, cl.image_precache[index]);
+            token = cl.configstrings[cl.csr.images + index];
+            if (token[0]) {
+                qhandle_t pic = cl.image_precache[index];
+                if (pic != 0) {
+                    // hack for action mod scope scaling
+                    if (x == scr.hud_width  / 2 - 160 &&
+                        y == scr.hud_height / 2 - 120 &&
+                        Com_WildCmp("scope?x", token))
+                    {
+                        int w = 320 * ch_scale->value;
+                        int h = 240 * ch_scale->value;
+                        R_DrawStretchPic((scr.hud_width  - w) / 2 + ch_x->integer,
+                                        (scr.hud_height - h) / 2 + ch_y->integer,
+                                        w, h, pic);
+                    } else {
+                        R_DrawPic(x, y, pic);
+                    }
+                }
             }
 
             if (value == STAT_SELECTED_ICON && scr_showitemname->integer)
@@ -1721,25 +1692,25 @@ static void SCR_ExecuteLayoutString(const char *s)
             int     score, ping, time;
 
             token = COM_Parse(&s);
-            x = scr.hud_width / 2 - 160 + atoi(token);
+            x = scr.hud_width / 2 - 160 + Q_atoi(token);
             token = COM_Parse(&s);
-            y = scr.hud_height / 2 - 120 + atoi(token);
+            y = scr.hud_height / 2 - 120 + Q_atoi(token);
 
             token = COM_Parse(&s);
-            value = atoi(token);
+            value = Q_atoi(token);
             if (value < 0 || value >= MAX_CLIENTS) {
                 Com_Error(ERR_DROP, "%s: invalid client index", __func__);
             }
             ci = &cl.clientinfo[value];
 
             token = COM_Parse(&s);
-            score = atoi(token);
+            score = Q_atoi(token);
 
             token = COM_Parse(&s);
-            ping = atoi(token);
+            ping = Q_atoi(token);
 
             token = COM_Parse(&s);
-            time = atoi(token);
+            time = Q_atoi(token);
 
             HUD_DrawAltString(x + 32, y, ci->name);
             HUD_DrawString(x + 32, y + CHAR_HEIGHT, "Score: ");
@@ -1762,22 +1733,22 @@ static void SCR_ExecuteLayoutString(const char *s)
             int     score, ping;
 
             token = COM_Parse(&s);
-            x = scr.hud_width / 2 - 160 + atoi(token);
+            x = scr.hud_width / 2 - 160 + Q_atoi(token);
             token = COM_Parse(&s);
-            y = scr.hud_height / 2 - 120 + atoi(token);
+            y = scr.hud_height / 2 - 120 + Q_atoi(token);
 
             token = COM_Parse(&s);
-            value = atoi(token);
+            value = Q_atoi(token);
             if (value < 0 || value >= MAX_CLIENTS) {
                 Com_Error(ERR_DROP, "%s: invalid client index", __func__);
             }
             ci = &cl.clientinfo[value];
 
             token = COM_Parse(&s);
-            score = atoi(token);
+            score = Q_atoi(token);
 
             token = COM_Parse(&s);
-            ping = atoi(token);
+            ping = Q_atoi(token);
             if (ping > 999)
                 ping = 999;
 
@@ -1801,9 +1772,9 @@ static void SCR_ExecuteLayoutString(const char *s)
         if (!strcmp(token, "num")) {
             // draw a number
             token = COM_Parse(&s);
-            width = atoi(token);
+            width = Q_atoi(token);
             token = COM_Parse(&s);
-            value = atoi(token);
+            value = Q_atoi(token);
             if (value < 0 || value >= MAX_STATS) {
                 Com_Error(ERR_DROP, "%s: invalid stat index", __func__);
             }
@@ -1870,17 +1841,30 @@ static void SCR_ExecuteLayoutString(const char *s)
             continue;
         }
 
-        if (!strcmp(token, "stat_string")) {
+        if (!strncmp(token, "stat_", 5)) {
+            char *cmd = token + 5;
             token = COM_Parse(&s);
-            index = atoi(token);
+            index = Q_atoi(token);
             if (index < 0 || index >= MAX_STATS) {
                 Com_Error(ERR_DROP, "%s: invalid stat index", __func__);
             }
             index = cl.frame.ps.stats[index];
-            if (index < 0 || index >= MAX_CONFIGSTRINGS) {
+            if (index < 0 || index >= cl.csr.end) {
                 Com_Error(ERR_DROP, "%s: invalid string index", __func__);
             }
-            HUD_DrawString(x, y, cl.configstrings[index]);
+            token = cl.configstrings[index];
+            if (!strcmp(cmd, "string"))
+                HUD_DrawString(x, y, token);
+            else if (!strcmp(cmd, "string2"))
+                HUD_DrawAltString(x, y, token);
+            else if (!strcmp(cmd, "cstring"))
+                HUD_DrawCenterString(x + 320 / 2, y, token);
+            else if (!strcmp(cmd, "cstring2"))
+                HUD_DrawAltCenterString(x + 320 / 2, y, token);
+            else if (!strcmp(cmd, "rstring"))
+                HUD_DrawRightString(x, y, token);
+            else if (!strcmp(cmd, "rstring2"))
+                HUD_DrawAltRightString(x, y, token);
             continue;
         }
 
@@ -1908,15 +1892,29 @@ static void SCR_ExecuteLayoutString(const char *s)
             continue;
         }
 
+        if (!strcmp(token, "rstring")) {
+            token = COM_Parse(&s);
+            HUD_DrawRightString(x, y, token);
+            continue;
+        }
+
+        if (!strcmp(token, "rstring2")) {
+            token = COM_Parse(&s);
+            HUD_DrawAltRightString(x, y, token);
+            continue;
+        }
+
         if (!strcmp(token, "if")) {
             token = COM_Parse(&s);
-            value = atoi(token);
+            value = Q_atoi(token);
             if (value < 0 || value >= MAX_STATS) {
                 Com_Error(ERR_DROP, "%s: invalid stat index", __func__);
             }
             value = cl.frame.ps.stats[value];
             if (!value) {   // skip to endif
-                while (strcmp(token, "endif")) {
+                if (cl.csr.extended) {
+                    SCR_SkipToEndif(&s);
+                } else while (strcmp(token, "endif")) {
                     token = COM_Parse(&s);
                     if (!s) {
                         break;
@@ -1926,6 +1924,7 @@ static void SCR_ExecuteLayoutString(const char *s)
             continue;
         }
 
+        // Q2PRO extension
         if (!strcmp(token, "color")) {
             color_t     color;
 
@@ -1934,6 +1933,26 @@ static void SCR_ExecuteLayoutString(const char *s)
                 color.u8[3] *= scr_alpha->value;
                 R_SetColor(color.u32);
             }
+            continue;
+        }
+
+        if (!strcmp(token, "health_bars")) {
+            token = COM_Parse(&s);
+            value = Q_atoi(token);
+            if (value < 0 || value >= MAX_STATS) {
+                Com_Error(ERR_DROP, "%s: invalid stat index", __func__);
+            }
+            value = cl.frame.ps.stats[value];
+
+            token = COM_Parse(&s);
+            index = Q_atoi(token);
+            if (index < 0 || index >= cl.csr.end) {
+                Com_Error(ERR_DROP, "%s: invalid string index", __func__);
+            }
+
+            HUD_DrawCenterString(x + 320 / 2, y, cl.configstrings[index]);
+            SCR_DrawHealthBar(x + 320 / 2, y + CHAR_HEIGHT + 4, value & 0xff);
+            SCR_DrawHealthBar(x + 320 / 2, y + CHAR_HEIGHT + 12, (value >> 8) & 0xff);
             continue;
         }
     }
@@ -1968,7 +1987,7 @@ static void SCR_DrawLoading(void)
     if (!scr.draw_loading)
         return;
 
-    scr.draw_loading = qfalse;
+    scr.draw_loading = false;
 
     R_SetScale(scr.hud_scale);
 
@@ -1985,6 +2004,8 @@ static void SCR_DrawCrosshair(void)
     int x, y;
 
     if (!scr_crosshair->integer)
+        return;
+    if (cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_HIDE_HUD | LAYOUTS_HIDE_CROSSHAIR))
         return;
 
     x = (scr.hud_width - scr.crosshair_width) / 2;
@@ -2004,6 +2025,8 @@ static void SCR_DrawStats(void)
 {
     if (scr_draw2d->integer <= 1)
         return;
+    if (cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_HIDE_HUD)
+        return;
 
     SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
 }
@@ -2016,7 +2039,7 @@ static void SCR_DrawLayout(void)
     if (cls.demo.playback && Key_IsDown(K_F1))
         goto draw;
 
-    if (!(cl.frame.ps.stats[STAT_LAYOUTS] & 1))
+    if (!(cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT))
         return;
 
 draw:
@@ -2025,18 +2048,18 @@ draw:
 
 static void SCR_Draw2D(void)
 {
-    if (scr_draw2d->integer <= 0)
-        return;     // turn off for screenshots
+	if (scr_draw2d->integer <= 0)
+		return;     // turn off for screenshots
 
-    if (cls.key_dest & KEY_MENU)
-        return;
+	if (cls.key_dest & KEY_MENU)
+		return;
 
 	R_SetAlphaScale(scr.hud_alpha);
 
     R_SetScale(scr.hud_scale);
 
-    scr.hud_height *= scr.hud_scale;
-    scr.hud_width *= scr.hud_scale;
+    scr.hud_height = Q_rint(scr.hud_height * scr.hud_scale);
+    scr.hud_width = Q_rint(scr.hud_width * scr.hud_scale);
 
     // crosshair has its own color and alpha
     SCR_DrawCrosshair();
@@ -2068,7 +2091,7 @@ static void SCR_Draw2D(void)
     // debug stats have no alpha
     R_ClearColor();
 
-#ifdef _DEBUG
+#if USE_DEBUG
     SCR_DrawDebugStats();
     SCR_DrawDebugPmove();
 #endif
@@ -2090,24 +2113,7 @@ static void SCR_DrawActive(void)
     }
 
     if (cls.state == ca_cinematic) {
-        if (cl.image_precache[0]) 
-        {
-            // scale the image to touch the screen from inside, keeping the aspect ratio
-
-            image_t* image = IMG_ForHandle(cl.image_precache[0]);
-
-            float zoomx = (float)r_config.width / (float)image->width;
-            float zoomy = (float)r_config.height / (float)image->height;
-            float zoom = min(zoomx, zoomy);
-
-            int w = (int)(image->width * zoom);
-            int h = (int)(image->height * zoom);
-            int x = (r_config.width - w) / 2;
-            int y = (r_config.height - h) / 2;
-
-            R_DrawFill8(0, 0, r_config.width, r_config.height, 0);
-            R_DrawStretchPic(x, y, w, h, cl.image_precache[0]);
-        }
+        SCR_DrawCinematic();
         return;
     }
 
@@ -2178,15 +2184,6 @@ void SCR_UpdateScreen(void)
 
     // draw loading plaque
     SCR_DrawLoading();
-
-#ifdef _DEBUG
-    // draw debug graphs
-    if (scr_timegraph->integer)
-        SCR_DebugGraph(cls.frametime * 300, 0);
-
-    if (scr_debuggraph->integer || scr_timegraph->integer || scr_netgraph->integer)
-        SCR_DrawDebugGraph();
-#endif
 
     R_EndFrame();
 

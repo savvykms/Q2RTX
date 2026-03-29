@@ -27,6 +27,21 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "vkpt.h"
 #include "shader/global_textures.h"
 
+enum {
+	STRETCH_PIC_SDR,
+	STRETCH_PIC_HDR,
+	STRETCH_PIC_NUM_PIPELINES
+};
+
+enum
+{
+	// Note: those values are ORed together to get the pipeline number
+	FINAL_BLIT_FILTERED = 0x1,
+	FINAL_BLIT_WARPED = 0x2,
+	// ... resulting in 4 different combinations
+	FINAL_BLIT_NUM_PIPELINES = 4
+};
+
 #define TEXNUM_WHITE (~0)
 #define MAX_STRETCH_PICS (1<<14)
 
@@ -42,24 +57,44 @@ typedef struct {
 	uint32_t color, tex_handle;
 } StretchPic_t;
 
+// Not using global UBO b/c it's only filled when a world is drawn, but here we need it all the time
+typedef struct {
+	float hdr_color_scale;
+	float tm_hdr_saturation_scale;
+} StretchPic_UBO_t;
+
+typedef struct {
+	vec2_t input_dimensions;
+} FinalBlitPushConstants_t;
+
 static clipRect_t clip_rect;
-static qboolean clip_enable = qfalse;
+static bool clip_enable = false;
 
 static StretchPic_t stretch_pic_queue[MAX_STRETCH_PICS];
 
 static VkPipelineLayout        pipeline_layout_stretch_pic;
 static VkPipelineLayout        pipeline_layout_final_blit;
 static VkRenderPass            render_pass_stretch_pic;
-static VkPipeline              pipeline_stretch_pic;
-static VkPipeline              pipeline_final_blit;
-static VkFramebuffer           framebuffer_stretch_pic[MAX_FRAMES_IN_FLIGHT];
+static VkPipeline              pipeline_stretch_pic[STRETCH_PIC_NUM_PIPELINES];
+static VkPipeline              pipeline_final_blit[FINAL_BLIT_NUM_PIPELINES];
+static VkFramebuffer*          framebuffer_stretch_pic = NULL;
 static BufferResource_t        buf_stretch_pic_queue[MAX_FRAMES_IN_FLIGHT];
+static BufferResource_t        buf_ubo[MAX_FRAMES_IN_FLIGHT];
 static VkDescriptorSetLayout   desc_set_layout_sbo;
+static VkDescriptorSetLayout   desc_set_layout_ubo;
+static VkDescriptorSetLayout   desc_set_layout_final_blit;
 static VkDescriptorPool        desc_pool_sbo;
+static VkDescriptorPool        desc_pool_ubo;
+static VkDescriptorPool        desc_pool_final_blit;
 static VkDescriptorSet         desc_set_sbo[MAX_FRAMES_IN_FLIGHT];
+static VkDescriptorSet         desc_set_ubo[MAX_FRAMES_IN_FLIGHT];
+static VkDescriptorSet         desc_set_final_blit[MAX_FRAMES_IN_FLIGHT];
+
+extern cvar_t* cvar_ui_hdr_nits;
+extern cvar_t* cvar_tm_hdr_saturation_scale;
 
 VkExtent2D
-vkpt_draw_get_extent()
+vkpt_draw_get_extent(void)
 {
 	return qvk.extent_unscaled;
 }
@@ -160,7 +195,7 @@ static inline void enqueue_stretch_pic(
 }
 
 static void
-create_render_pass()
+create_render_pass(void)
 {
 	LOG_FUNC();
 	VkAttachmentDescription color_attachment = {
@@ -218,11 +253,16 @@ vkpt_draw_initialize()
 {
 	num_stretch_pics = 0;
 	LOG_FUNC();
-	create_render_pass();
 	for(int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		_VK(buffer_create(buf_stretch_pic_queue + i, sizeof(StretchPic_t) * MAX_STRETCH_PICS, 
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+		buffer_attach_name(buf_stretch_pic_queue + i, va("stretch pic queue %d", i));
+
+		_VK(buffer_create(buf_ubo + i, sizeof(StretchPic_UBO_t),
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+		buffer_attach_name(buf_stretch_pic_queue + i, va("stretch pic ubo %d", i));
 	}
 
 	VkDescriptorSetLayoutBinding layout_bindings[] = {
@@ -258,12 +298,103 @@ vkpt_draw_initialize()
 	_VK(vkCreateDescriptorPool(qvk.device, &pool_info, NULL, &desc_pool_sbo));
 	ATTACH_LABEL_VARIABLE(desc_pool_sbo, DESCRIPTOR_POOL);
 
+	VkDescriptorSetLayoutBinding layout_bindings_ubo[] = {
+		{
+			.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.binding         = 2,
+			.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+		},
+	};
+
+	VkDescriptorSetLayoutCreateInfo layout_info_ubo = {
+		.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = LENGTH(layout_bindings_ubo),
+		.pBindings    = layout_bindings_ubo,
+	};
+
+	_VK(vkCreateDescriptorSetLayout(qvk.device, &layout_info_ubo, NULL, &desc_set_layout_ubo));
+	ATTACH_LABEL_VARIABLE(desc_set_layout_ubo, DESCRIPTOR_SET_LAYOUT);
+
+	VkDescriptorPoolSize pool_size_ubo = {
+		.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	};
+
+	VkDescriptorPoolCreateInfo pool_info_ubo = {
+		.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.poolSizeCount = 1,
+		.pPoolSizes    = &pool_size_ubo,
+		.maxSets       = MAX_FRAMES_IN_FLIGHT,
+	};
+
+	_VK(vkCreateDescriptorPool(qvk.device, &pool_info_ubo, NULL, &desc_pool_ubo));
+	ATTACH_LABEL_VARIABLE(desc_pool_ubo, DESCRIPTOR_POOL);
+
+	VkDescriptorSetLayoutBinding layout_binding_final_blit[] = {
+		{
+			.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = 1,
+			.binding         = 0,
+			.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+		},
+		{
+			.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = 1,
+			.binding         = 1,
+			.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+		},
+	};
+
+	VkDescriptorSetLayoutCreateInfo layout_info_final_blit = {
+		.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = LENGTH(layout_binding_final_blit),
+		.pBindings    = layout_binding_final_blit,
+	};
+
+	_VK(vkCreateDescriptorSetLayout(qvk.device, &layout_info_final_blit, NULL, &desc_set_layout_final_blit));
+	ATTACH_LABEL_VARIABLE(desc_set_layout_final_blit, DESCRIPTOR_SET_LAYOUT);
+
+	VkDescriptorPoolSize pool_size_final_blit[] = {
+		{
+			.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = MAX_FRAMES_IN_FLIGHT,
+		},
+		{
+			.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = MAX_FRAMES_IN_FLIGHT,
+		},
+	};
+
+	VkDescriptorPoolCreateInfo pool_info_final_blit = {
+		.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.poolSizeCount = LENGTH(pool_size_final_blit),
+		.pPoolSizes    = pool_size_final_blit,
+		.maxSets       = MAX_FRAMES_IN_FLIGHT,
+	};
+
+	_VK(vkCreateDescriptorPool(qvk.device, &pool_info_final_blit, NULL, &desc_pool_final_blit));
+	ATTACH_LABEL_VARIABLE(desc_pool_final_blit, DESCRIPTOR_POOL);
 
 	VkDescriptorSetAllocateInfo descriptor_set_alloc_info = {
 		.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.descriptorPool     = desc_pool_sbo,
 		.descriptorSetCount = 1,
 		.pSetLayouts        = &desc_set_layout_sbo,
+	};
+
+	VkDescriptorSetAllocateInfo descriptor_set_alloc_info_ubo = {
+		.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool     = desc_pool_ubo,
+		.descriptorSetCount = 1,
+		.pSetLayouts        = &desc_set_layout_ubo,
+	};
+
+	VkDescriptorSetAllocateInfo descriptor_set_alloc_info_final_blit = {
+		.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool     = desc_pool_final_blit,
+		.descriptorSetCount = 1,
+		.pSetLayouts        = &desc_set_layout_final_blit,
 	};
 
 	for(int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -287,6 +418,29 @@ vkpt_draw_initialize()
 		};
 
 		vkUpdateDescriptorSets(qvk.device, 1, &output_buf_write, 0, NULL);
+
+		_VK(vkAllocateDescriptorSets(qvk.device, &descriptor_set_alloc_info_ubo, desc_set_ubo + i));
+		BufferResource_t *ubo = buf_ubo + i;
+
+		VkDescriptorBufferInfo buf_info_ubo = {
+			.buffer = ubo->buffer,
+			.offset = 0,
+			.range  = sizeof(StretchPic_UBO_t),
+		};
+
+		VkWriteDescriptorSet output_buf_write_ubo = {
+			.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet          = desc_set_ubo[i],
+			.dstBinding      = 2,
+			.dstArrayElement = 0,
+			.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.pBufferInfo     = &buf_info_ubo,
+		};
+
+		vkUpdateDescriptorSets(qvk.device, 1, &output_buf_write_ubo, 0, NULL);
+
+		_VK(vkAllocateDescriptorSets(qvk.device, &descriptor_set_alloc_info_final_blit, desc_set_final_blit + i));
 	}
 	return VK_SUCCESS;
 }
@@ -297,10 +451,14 @@ vkpt_draw_destroy()
 	LOG_FUNC();
 	for(int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		buffer_destroy(buf_stretch_pic_queue + i);
+		buffer_destroy(buf_ubo + i);
 	}
-	vkDestroyRenderPass(qvk.device, render_pass_stretch_pic, NULL);
 	vkDestroyDescriptorPool(qvk.device, desc_pool_sbo, NULL);
 	vkDestroyDescriptorSetLayout(qvk.device, desc_set_layout_sbo, NULL);
+	vkDestroyDescriptorPool(qvk.device, desc_pool_ubo, NULL);
+	vkDestroyDescriptorSetLayout(qvk.device, desc_set_layout_ubo, NULL);
+	vkDestroyDescriptorPool(qvk.device, desc_pool_final_blit, NULL);
+	vkDestroyDescriptorSetLayout(qvk.device, desc_set_layout_final_blit, NULL);
 
 	return VK_SUCCESS;
 }
@@ -309,13 +467,22 @@ VkResult
 vkpt_draw_destroy_pipelines()
 {
 	LOG_FUNC();
-	vkDestroyPipeline(qvk.device, pipeline_stretch_pic, NULL);
-	vkDestroyPipeline(qvk.device, pipeline_final_blit, NULL);
+	for(int i = 0; i < STRETCH_PIC_NUM_PIPELINES; i++) {
+		vkDestroyPipeline(qvk.device, pipeline_stretch_pic[i], NULL);
+	}
+	for(int i = 0; i < FINAL_BLIT_NUM_PIPELINES; i++) {
+		vkDestroyPipeline(qvk.device, pipeline_final_blit[i], NULL);
+	}
 	vkDestroyPipelineLayout(qvk.device, pipeline_layout_stretch_pic, NULL);
 	vkDestroyPipelineLayout(qvk.device, pipeline_layout_final_blit, NULL);
 	for(int i = 0; i < qvk.num_swap_chain_images; i++) {
 		vkDestroyFramebuffer(qvk.device, framebuffer_stretch_pic[i], NULL);
 	}
+	free(framebuffer_stretch_pic);
+	framebuffer_stretch_pic = NULL;
+
+	vkDestroyRenderPass(qvk.device, render_pass_stretch_pic, NULL);
+	
 	return VK_SUCCESS;
 }
 
@@ -324,25 +491,54 @@ vkpt_draw_create_pipelines()
 {
 	LOG_FUNC();
 
+	create_render_pass();
+
 	assert(desc_set_layout_sbo);
 	VkDescriptorSetLayout desc_set_layouts[] = {
-		desc_set_layout_sbo, qvk.desc_set_layout_textures
+		desc_set_layout_sbo, qvk.desc_set_layout_textures, desc_set_layout_ubo
 	};
 	CREATE_PIPELINE_LAYOUT(qvk.device, &pipeline_layout_stretch_pic, 
 		.setLayoutCount = LENGTH(desc_set_layouts),
 		.pSetLayouts    = desc_set_layouts
 	);
 
-	desc_set_layouts[0] = qvk.desc_set_layout_ubo;
+	VkPushConstantRange push_constant_range_final_blit = {
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.offset     = 0,
+		.size       = sizeof(FinalBlitPushConstants_t)
+	};
 
+	VkDescriptorSetLayout desc_set_layouts_final_blit[] = {
+		qvk.desc_set_layout_ubo, desc_set_layout_final_blit
+	};
 	CREATE_PIPELINE_LAYOUT(qvk.device, &pipeline_layout_final_blit,
-		.setLayoutCount = LENGTH(desc_set_layouts),
-		.pSetLayouts = desc_set_layouts
+		.setLayoutCount = LENGTH(desc_set_layouts_final_blit),
+		.pSetLayouts = desc_set_layouts_final_blit,
+		.pushConstantRangeCount = 1,
+		.pPushConstantRanges = &push_constant_range_final_blit
 	);
 
-	VkPipelineShaderStageCreateInfo shader_info[] = {
+	VkSpecializationMapEntry specEntries[] = {
+		{ .constantID = 0, .offset = 0, .size = sizeof(uint32_t) }
+	};
+
+	// "HDR display" flag
+	uint32_t spec_data[] = {
+		0,
+		1,
+	};
+
+	VkSpecializationInfo specInfo_SDR = {.mapEntryCount = 1, .pMapEntries = specEntries, .dataSize = sizeof(uint32_t), .pData = &spec_data[0]};
+	VkSpecializationInfo specInfo_HDR = {.mapEntryCount = 1, .pMapEntries = specEntries, .dataSize = sizeof(uint32_t), .pData = &spec_data[1]};
+
+	VkPipelineShaderStageCreateInfo shader_info_SDR[] = {
 		SHADER_STAGE(QVK_MOD_STRETCH_PIC_VERT, VK_SHADER_STAGE_VERTEX_BIT),
-		SHADER_STAGE(QVK_MOD_STRETCH_PIC_FRAG, VK_SHADER_STAGE_FRAGMENT_BIT)
+		SHADER_STAGE_SPEC(QVK_MOD_STRETCH_PIC_FRAG, VK_SHADER_STAGE_FRAGMENT_BIT, &specInfo_SDR)
+	};
+
+	VkPipelineShaderStageCreateInfo shader_info_HDR[] = {
+		SHADER_STAGE(QVK_MOD_STRETCH_PIC_VERT, VK_SHADER_STAGE_VERTEX_BIT),
+		SHADER_STAGE_SPEC(QVK_MOD_STRETCH_PIC_FRAG, VK_SHADER_STAGE_FRAGMENT_BIT, &specInfo_HDR)
 	};
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info = {
@@ -414,8 +610,8 @@ vkpt_draw_create_pipelines()
 		.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
 		.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
 		.colorBlendOp        = VK_BLEND_OP_ADD,
-		.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-		.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+		.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+		.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
 		.alphaBlendOp        = VK_BLEND_OP_ADD,
 	};
 
@@ -429,9 +625,8 @@ vkpt_draw_create_pipelines()
 	};
 
 	VkGraphicsPipelineCreateInfo pipeline_info = {
-		.sType      = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-		.stageCount = LENGTH(shader_info),
-		.pStages    = shader_info,
+		.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount          = LENGTH(shader_info_SDR),
 
 		.pVertexInputState   = &vertex_input_info,
 		.pInputAssemblyState = &input_assembly_info,
@@ -450,22 +645,36 @@ vkpt_draw_create_pipelines()
 		.basePipelineIndex   = -1,
 	};
 
-	_VK(vkCreateGraphicsPipelines(qvk.device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline_stretch_pic));
-	ATTACH_LABEL_VARIABLE(pipeline_stretch_pic, PIPELINE);
+	pipeline_info.pStages = shader_info_SDR;
+	_VK(vkCreateGraphicsPipelines(qvk.device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline_stretch_pic[STRETCH_PIC_SDR]));
+	ATTACH_LABEL_VARIABLE(pipeline_stretch_pic[STRETCH_PIC_SDR], PIPELINE);
+
+	pipeline_info.pStages = shader_info_HDR;
+	_VK(vkCreateGraphicsPipelines(qvk.device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline_stretch_pic[STRETCH_PIC_HDR]));
+	ATTACH_LABEL_VARIABLE(pipeline_stretch_pic[STRETCH_PIC_HDR], PIPELINE);
 
 
-	VkPipelineShaderStageCreateInfo shader_info_final_blit[] = {
-		SHADER_STAGE(QVK_MOD_FINAL_BLIT_VERT, VK_SHADER_STAGE_VERTEX_BIT),
-		SHADER_STAGE(QVK_MOD_FINAL_BLIT_LANCZOS_FRAG, VK_SHADER_STAGE_FRAGMENT_BIT)
+	VkSpecializationMapEntry final_blit_spec_entries[] = {
+		{ .constantID = 0, .offset = 0, .size = sizeof(uint32_t) },
+		{ .constantID = 1, .offset = 4, .size = sizeof(uint32_t) }
 	};
 
-	pipeline_info.pStages = shader_info_final_blit;
 	pipeline_info.layout = pipeline_layout_final_blit;
+	for (int i = 0; i < FINAL_BLIT_NUM_PIPELINES; i++) {
+		uint32_t final_blit_spec_data[2] = {(i & FINAL_BLIT_FILTERED) ? 1 : 0, (i & FINAL_BLIT_WARPED) ? 1 : 0};
+		VkSpecializationInfo spec_info_final_blit = {.mapEntryCount = LENGTH(final_blit_spec_entries), .pMapEntries = final_blit_spec_entries, .dataSize = sizeof(uint32_t) * 2, .pData = final_blit_spec_data};
 
-	_VK(vkCreateGraphicsPipelines(qvk.device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline_final_blit));
-	ATTACH_LABEL_VARIABLE(pipeline_final_blit, PIPELINE);
+		VkPipelineShaderStageCreateInfo shader_info_final_blit[] = {
+			SHADER_STAGE(QVK_MOD_FINAL_BLIT_VERT, VK_SHADER_STAGE_VERTEX_BIT),
+			SHADER_STAGE_SPEC(QVK_MOD_FINAL_BLIT_FRAG, VK_SHADER_STAGE_FRAGMENT_BIT, &spec_info_final_blit)
+		};
 
+		pipeline_info.pStages = shader_info_final_blit;
+		_VK(vkCreateGraphicsPipelines(qvk.device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline_final_blit[i]));
+		ATTACH_LABEL_VARIABLE(pipeline_final_blit[i], PIPELINE);
+	}
 
+	framebuffer_stretch_pic = malloc(qvk.num_swap_chain_images * sizeof(*framebuffer_stretch_pic));
 	for(int i = 0; i < qvk.num_swap_chain_images; i++) {
 		VkImageView attachments[] = {
 			qvk.swap_chain_image_views[i]
@@ -507,6 +716,13 @@ vkpt_draw_submit_stretch_pics(VkCommandBuffer cmd_buf)
 	buffer_unmap(buf_spq);
 	spq_dev = NULL;
 
+	BufferResource_t *ubo_res = buf_ubo + qvk.current_frame_index;
+	StretchPic_UBO_t *ubo = (StretchPic_UBO_t *) buffer_map(ubo_res);
+	ubo->hdr_color_scale = cvar_ui_hdr_nits->value * 0.0125;
+	ubo->tm_hdr_saturation_scale = cvar_tm_hdr_saturation_scale->value;
+	buffer_unmap(ubo_res);
+	ubo = NULL;
+
 	VkRenderPassBeginInfo render_pass_info = {
 		.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		.renderPass        = render_pass_stretch_pic,
@@ -517,13 +733,14 @@ vkpt_draw_submit_stretch_pics(VkCommandBuffer cmd_buf)
 
 	VkDescriptorSet desc_sets[] = {
 		desc_set_sbo[qvk.current_frame_index],
-		qvk_get_current_desc_set_textures()
+		qvk_get_current_desc_set_textures(),
+		desc_set_ubo[qvk.current_frame_index],
 	};
 
 	vkCmdBeginRenderPass(cmd_buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			pipeline_layout_stretch_pic, 0, LENGTH(desc_sets), desc_sets, 0, 0);
-	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_stretch_pic);
+	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_stretch_pic[qvk.surf_is_hdr ? STRETCH_PIC_HDR : STRETCH_PIC_SDR]);
 	vkCmdDraw(cmd_buf, 4, num_stretch_pics, 0, 0);
 	vkCmdEndRenderPass(cmd_buf);
 
@@ -532,79 +749,44 @@ vkpt_draw_submit_stretch_pics(VkCommandBuffer cmd_buf)
 }
 
 VkResult
-vkpt_final_blit_simple(VkCommandBuffer cmd_buf)
+vkpt_final_blit(VkCommandBuffer cmd_buf, unsigned int image_index, VkExtent2D extent, bool filtered, bool warped)
 {
-	VkImageSubresourceRange subresource_range = {
-		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.baseMipLevel = 0,
-		.levelCount = 1,
-		.baseArrayLayer = 0,
-		.layerCount = 1
+	VkDescriptorImageInfo img_info_input = {
+		.imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.imageView   = qvk.images_views[image_index],
+		.sampler     = qvk.tex_sampler,
+	};
+	VkImageView debug_lines_view = vpkt_debugdraw_imageview();
+	if (!debug_lines_view)
+		debug_lines_view = qvk.images_views[VKPT_IMG_CLEAR];
+	VkDescriptorImageInfo img_info_debug_lines = {
+		.imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.imageView   = debug_lines_view,
+		.sampler     = qvk.tex_sampler_nearest,
+	};
+	VkWriteDescriptorSet elem_images[] = {
+		{
+			.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet          = desc_set_final_blit[qvk.current_frame_index],
+			.dstBinding      = 0,
+			.dstArrayElement = 0,
+			.descriptorCount = 1,
+			.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo      = &img_info_input,
+		},
+		{
+			.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet          = desc_set_final_blit[qvk.current_frame_index],
+			.dstBinding      = 1,
+			.dstArrayElement = 0,
+			.descriptorCount = 1,
+			.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo      = &img_info_debug_lines,
+		},
 	};
 
-	IMAGE_BARRIER(cmd_buf,
-		.image = qvk.swap_chain_images[qvk.current_swap_chain_image_index],
-		.subresourceRange = subresource_range,
-		.srcAccessMask = 0,
-		.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-		.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-		.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-	);
+	vkUpdateDescriptorSets(qvk.device, LENGTH(elem_images), elem_images, 0, NULL);
 
-	int output_img = VKPT_IMG_TAA_OUTPUT;
-
-	IMAGE_BARRIER(cmd_buf,
-		.image = qvk.images[output_img],
-		.subresourceRange = subresource_range,
-		.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-		.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-		.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-	);
-
-	VkOffset3D blit_size = {
-		.x = qvk.extent_taa_output.width,
-		.y = qvk.extent_taa_output.height,
-		.z = 1
-	};
-	VkOffset3D blit_size_unscaled = {
-		.x = qvk.extent_unscaled.width,.y = qvk.extent_unscaled.height,.z = 1
-	};
-	VkImageBlit img_blit = {
-		.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-		.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-		.srcOffsets = { [1] = blit_size },
-		.dstOffsets = { [1] = blit_size_unscaled },
-	};
-	vkCmdBlitImage(cmd_buf,
-		qvk.images[output_img], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		qvk.swap_chain_images[qvk.current_swap_chain_image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1, &img_blit, VK_FILTER_NEAREST);
-
-	IMAGE_BARRIER(cmd_buf,
-		.image = qvk.swap_chain_images[qvk.current_swap_chain_image_index],
-		.subresourceRange = subresource_range,
-		.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-		.dstAccessMask = 0,
-		.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-	);
-
-	IMAGE_BARRIER(cmd_buf,
-		.image = qvk.images[output_img],
-		.subresourceRange = subresource_range,
-		.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-		.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-		.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		.newLayout = VK_IMAGE_LAYOUT_GENERAL
-	);
-
-	return VK_SUCCESS;
-}
-
-VkResult
-vkpt_final_blit_filtered(VkCommandBuffer cmd_buf)
-{
 	VkRenderPassBeginInfo render_pass_info = {
 		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		.renderPass = render_pass_stretch_pic,
@@ -615,13 +797,18 @@ vkpt_final_blit_filtered(VkCommandBuffer cmd_buf)
 
 	VkDescriptorSet desc_sets[] = {
 		qvk.desc_set_ubo,
-		qvk_get_current_desc_set_textures()
+		desc_set_final_blit[qvk.current_frame_index]
 	};
+
+	FinalBlitPushConstants_t push_constants = {.input_dimensions = {extent.width, extent.height}};
 
 	vkCmdBeginRenderPass(cmd_buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
 		pipeline_layout_final_blit, 0, LENGTH(desc_sets), desc_sets, 0, 0);
-	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_final_blit);
+	int pipeline_idx = (filtered ? FINAL_BLIT_FILTERED : 0) | (warped ? FINAL_BLIT_WARPED : 0);
+	vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_final_blit[pipeline_idx]);
+	vkCmdPushConstants(cmd_buf, pipeline_layout_final_blit,
+		VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push_constants), &push_constants);
 	vkCmdDraw(cmd_buf, 4, 1, 0, 0);
 	vkCmdEndRenderPass(cmd_buf);
 
@@ -632,12 +819,12 @@ void R_SetClipRect_RTX(const clipRect_t *clip)
 { 
 	if (clip)
 	{
-		clip_enable = qtrue;
+		clip_enable = true;
 		clip_rect = *clip;
 	}
 	else
 	{
-		clip_enable = qfalse;
+		clip_enable = false;
 	}
 }
 
@@ -669,7 +856,7 @@ R_SetColor_RTX(uint32_t color)
 }
 
 void
-R_LightPoint_RTX(vec3_t origin, vec3_t light)
+R_LightPoint_RTX(const vec3_t origin, vec3_t light)
 {
 	VectorSet(light, 1, 1, 1);
 }
@@ -694,6 +881,55 @@ R_DrawPic_RTX(int x, int y, qhandle_t pic)
 {
 	image_t *image = IMG_ForHandle(pic);
 	R_DrawStretchPic(x, y, image->width, image->height, pic);
+}
+
+void
+R_DrawStretchRaw_RTX(int x, int y, int w, int h)
+{
+	if(!qvk.raw_image)
+		return;
+	R_DrawStretchPic(x, y, w, h, qvk.raw_image - r_images);
+}
+
+void
+R_UpdateRawPic_RTX(int pic_w, int pic_h, const uint32_t *pic)
+{
+	if(qvk.raw_image)
+		R_UnregisterImage(qvk.raw_image - r_images);
+
+	size_t raw_size = pic_w * pic_h * 4;
+	byte *raw_data = Z_Malloc(raw_size);
+	memcpy(raw_data, pic, raw_size);
+	static int raw_id;
+	qvk.raw_image = r_images + R_RegisterRawImage(va("**raw[%d]**", raw_id++), pic_w, pic_h, raw_data, IT_SPRITE, IF_SRGB);
+}
+
+void
+R_DiscardRawPic_RTX(void)
+{
+	if(qvk.raw_image) {
+		R_UnregisterImage(qvk.raw_image - r_images);
+		qvk.raw_image = NULL;
+	}
+}
+
+void R_DrawKeepAspectPic_RTX(int x, int y, int w, int h, qhandle_t pic)
+{
+    image_t *image = IMG_ForHandle(pic);
+
+    if (image->flags & IF_SCRAP) {
+        R_DrawStretchPic_RTX(x, y, w, h, pic);
+        return;
+    }
+
+    float scale_w = w;
+    float scale_h = h * image->aspect;
+    float scale = max(scale_w, scale_h);
+
+    float s = (1.0f - scale_w / scale) * 0.5f;
+    float t = (1.0f - scale_h / scale) * 0.5f;
+
+    enqueue_stretch_pic(x, y, w, h, s, t, 1.0f - s, 1.0f - t, draw.colors[0].u32, pic);
 }
 
 #define DIV64 (1.0f / 64.0f)

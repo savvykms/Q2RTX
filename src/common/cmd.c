@@ -35,8 +35,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define Cmd_Malloc(size)        Z_TagMalloc(size, TAG_CMD)
 #define Cmd_CopyString(string)  Z_TagCopyString(string, TAG_CMD)
 
-static char *Cmd_ArgsRange(int from, int to);
-
 /*
 =============================================================================
 
@@ -62,13 +60,8 @@ bind g "impulse 5 ; +attack ; wait ; -attack ; impulse 2"
 */
 static void Cmd_Wait_f(void)
 {
-    int count;
-
-    count = atoi(Cmd_Argv(1));
-    if (count < 1) {
-        count = 1;
-    }
-    cmd_current->waitCount += count;
+    int count = Q_atoi(Cmd_Argv(1));
+    cmd_current->waitCount += max(count, 1);
 }
 
 /*
@@ -96,25 +89,13 @@ void Cbuf_AddText(cmdbuf_t *buf, const char *text)
 {
     size_t l = strlen(text);
 
-    if (buf->cursize + l > buf->maxsize) {
+    Q_assert(buf->cursize <= buf->maxsize);
+    if (l > buf->maxsize - buf->cursize) {
         Com_WPrintf("%s: overflow\n", __func__);
         return;
     }
     memcpy(buf->text + buf->cursize, text, l);
     buf->cursize += l;
-}
-
-char *Cbuf_Alloc(cmdbuf_t *buf, size_t len)
-{
-    char *text;
-
-    if (buf->cursize + len > buf->maxsize) {
-        return NULL;
-    }
-    text = buf->text + buf->cursize;
-    buf->cursize += len;
-
-    return text;
 }
 
 /*
@@ -133,7 +114,8 @@ void Cbuf_InsertText(cmdbuf_t *buf, const char *text)
     if (!l) {
         return;
     }
-    if (buf->cursize + l + 1 > buf->maxsize) {
+    Q_assert(buf->cursize <= buf->maxsize);
+    if (l + 1 > buf->maxsize - buf->cursize) {
         Com_WPrintf("%s: overflow\n", __func__);
         return;
     }
@@ -155,6 +137,7 @@ void Cbuf_Execute(cmdbuf_t *buf)
     char    *text;
     char    line[MAX_STRING_CHARS];
     int     quotes;
+    bool    ok;
 
     while (buf->cursize) {
         if (buf->waitCount > 0) {
@@ -177,12 +160,12 @@ void Cbuf_Execute(cmdbuf_t *buf)
         }
 
         // check for overflow
-        if (i > sizeof(line) - 1) {
-            i = sizeof(line) - 1;
+        ok = false;
+        if (i < sizeof(line)) {
+            memcpy(line, text, i);
+            line[i] = 0;
+            ok = true;
         }
-
-        memcpy(line, text, i);
-        line[i] = 0;
 
 // delete the text from the command buffer and move remaining commands down
 // this is necessary because commands (exec, alias) can insert data at the
@@ -196,10 +179,25 @@ void Cbuf_Execute(cmdbuf_t *buf)
         }
 
 // execute the command line
-        cmd_current = buf;
-        buf->exec(buf, line);
+        if (ok) {
+            cmd_current = buf;
+            buf->exec(buf, line);
+        } else {
+            Com_Printf("Line exceeded %i chars, discarded.\n", MAX_STRING_CHARS);
+        }
     }
+}
 
+/*
+============
+Cbuf_Frame
+============
+*/
+void Cbuf_Frame(cmdbuf_t *buf)
+{
+    if (buf->waitCount > 0) {
+        buf->waitCount--;
+    }
     buf->aliasCount = 0;        // don't allow infinite alias loops
 }
 
@@ -275,7 +273,7 @@ void Cmd_AliasSet(const char *name, const char *cmd)
     }
 
     len = strlen(name);
-    a = Cmd_Malloc(sizeof(cmdalias_t) + len);
+    a = Cmd_Malloc(sizeof(*a) + len);
     memcpy(a->name, name, len + 1);
     a->value = Cmd_CopyString(cmd);
 
@@ -289,11 +287,8 @@ void Cmd_Alias_g(genctx_t *ctx)
 {
     cmdalias_t *a;
 
-    FOR_EACH_ALIAS(a) {
-        if (!Prompt_AddMatch(ctx, a->name)) {
-            break;
-        }
-    }
+    FOR_EACH_ALIAS(a)
+        Prompt_AddMatch(ctx, a->name);
 }
 
 
@@ -327,7 +322,7 @@ void Cmd_Alias_f(void)
         return;
     }
 
-    if (Cvar_Exists(s, qtrue)) {
+    if (Cvar_Exists(s, true)) {
         Com_Printf("\"%s\" already defined as a cvar\n", s);
         return;
     }
@@ -352,7 +347,7 @@ static void Cmd_UnAlias_f(void)
     static const cmd_option_t options[] = {
         { "h", "help", "display this message" },
         { "a", "all", "delete everything" },
-        { 0 }
+        { NULL }
     };
     char *s;
     cmdalias_t *a, *n;
@@ -362,7 +357,7 @@ static void Cmd_UnAlias_f(void)
     while ((c = Cmd_ParseOptions(options)) != -1) {
         switch (c) {
         case 'h':
-            Com_Printf("Usage: %s [-ha] [name]\n", Cmd_Argv(0));
+            Cmd_PrintUsage(options, "[name]");
             Cmd_PrintHelp(options);
             return;
         case 'a':
@@ -382,9 +377,8 @@ static void Cmd_UnAlias_f(void)
     }
 
     if (!cmd_optarg[0]) {
-        Com_Printf("Missing alias name.\n"
-                   "Try %s --help for more information.\n",
-                   Cmd_Argv(0));
+        Com_Printf("Missing alias name.\n");
+        Cmd_PrintHint();
         return;
     }
 
@@ -395,8 +389,8 @@ static void Cmd_UnAlias_f(void)
         return;
     }
 
-    List_Delete(&a->listEntry);
-    List_Delete(&a->hashEntry);
+    List_Remove(&a->listEntry);
+    List_Remove(&a->hashEntry);
 
     Z_Free(a->value);
     Z_Free(a);
@@ -580,7 +574,7 @@ void Cmd_ExecTrigger(const char *string)
 
     // execute matching triggers
     FOR_EACH_TRIGGER(trigger) {
-        match = Cmd_MacroExpandString(trigger->match, qfalse);
+        match = Cmd_MacroExpandString(trigger->match, false);
         if (match && Com_WildCmp(match, string)) {
             Cbuf_AddText(&cmd_buffer, trigger->command);
             Cbuf_AddText(&cmd_buffer, "\n");
@@ -604,8 +598,8 @@ Cmd_If_f
 static void Cmd_If_f(void)
 {
     char *a, *b, *op;
-    qboolean numeric;
-    qboolean matched;
+    bool numeric;
+    bool matched;
     int i, j;
 
     if (Cmd_Argc() < 5) {
@@ -619,28 +613,28 @@ static void Cmd_If_f(void)
 
     numeric = COM_IsFloat(a) && COM_IsFloat(b);
     if (!strcmp(op, "==")) {
-        matched = numeric ? atof(a) == atof(b) : !strcmp(a, b);
+        matched = numeric ? Q_atof(a) == Q_atof(b) : !strcmp(a, b);
     } else if (!strcmp(op, "!=") || !strcmp(op, "<>")) {
-        matched = numeric ? atof(a) != atof(b) : strcmp(a, b);
+        matched = numeric ? Q_atof(a) != Q_atof(b) : strcmp(a, b);
     } else if (!strcmp(op, "<")) {
         if (!numeric) {
 error:
             Com_Printf("Can't use '%s' with non-numeric expression(s)\n", op);
             return;
         }
-        matched = atof(a) < atof(b);
+        matched = Q_atof(a) < Q_atof(b);
     } else if (!strcmp(op, "<=")) {
         if (!numeric)
             goto error;
-        matched = atof(a) <= atof(b);
+        matched = Q_atof(a) <= Q_atof(b);
     } else if (!strcmp(op, ">")) {
         if (!numeric)
             goto error;
-        matched = atof(a) > atof(b);
+        matched = Q_atof(a) > Q_atof(b);
     } else if (!strcmp(op, ">=")) {
         if (!numeric)
             goto error;
-        matched = atof(a) >= atof(b);
+        matched = Q_atof(a) >= Q_atof(b);
     } else if (!Q_stricmp(op, "isin")) {
         matched = strstr(b, a) != NULL;
     } else if (!Q_stricmp(op, "!isin")) {
@@ -668,6 +662,7 @@ error:
     // scan out branch 1 argument range
     for (j = i; i < Cmd_Argc(); i++) {
         if (!Q_stricmp(Cmd_Argv(i), "else")) {
+            *Cmd_RawArgsFrom(i) = 0;
             break;
         }
     }
@@ -675,12 +670,12 @@ error:
     if (matched) {
         // execute branch 1
         if (i > j) {
-            Cbuf_InsertText(cmd_current, Cmd_ArgsRange(j, i - 1));
+            Cbuf_InsertText(cmd_current, COM_StripQuotes(COM_TrimSpace(Cmd_RawArgsFrom(j))));
         }
     } else {
         // execute branch 2
         if (++i < Cmd_Argc()) {
-            Cbuf_InsertText(cmd_current, Cmd_ArgsFrom(i));
+            Cbuf_InsertText(cmd_current, COM_StripQuotes(Cmd_RawArgsFrom(i)));
         }
     }
 }
@@ -709,8 +704,8 @@ static void Cmd_OpenURL_f(void)
 #ifdef __linux__
     pid_t pid = fork();
     if (pid == 0) {
-	char * args[] = { "xdg-open", url, NULL};
-	execv("/usr/bin/xdg-open", args);
+	const char* args[] = { "xdg-open", url, NULL};
+	execv("/usr/bin/xdg-open", (char* const*)args);
 	exit(0);
     }
 #elif _WINDOWS
@@ -755,11 +750,8 @@ void Cmd_Macro_g(genctx_t *ctx)
 {
     cmd_macro_t *m;
 
-    for (m = cmd_macros; m; m = m->next) {
-        if (!Prompt_AddMatch(ctx, m->name)) {
-            break;
-        }
-    }
+    for (m = cmd_macros; m; m = m->next)
+        Prompt_AddMatch(ctx, m->name);
 }
 
 /*
@@ -773,7 +765,7 @@ void Cmd_AddMacro(const char *name, xmacro_t function)
     unsigned hash;
 
 // fail if the macro is a variable name
-    if (Cvar_Exists(name, qfalse)) {
+    if (Cvar_Exists(name, false)) {
         Com_WPrintf("%s: %s already defined as a cvar\n", __func__, name);
         return;
     }
@@ -787,7 +779,7 @@ void Cmd_AddMacro(const char *name, xmacro_t function)
         return;
     }
 
-    macro = Cmd_Malloc(sizeof(cmd_macro_t));
+    macro = Cmd_Malloc(sizeof(*macro));
     macro->name = name;
     macro->function = function;
     macro->next = cmd_macros;
@@ -823,26 +815,25 @@ typedef struct cmd_function_s {
     char            *name;
 } cmd_function_t;
 
-static  list_t  cmd_functions;        // possible commands to execute
-static  list_t  cmd_hash[CMD_HASH_SIZE];
+static list_t   cmd_functions;      // possible commands to execute
+static list_t   cmd_hash[CMD_HASH_SIZE];
 
-static  int     cmd_argc;
-static  char    *cmd_argv[MAX_STRING_TOKENS]; // pointers to cmd_data[]
-static  char    *cmd_null_string = "";
+static int      cmd_argc;
+static char     *cmd_argv[MAX_STRING_TOKENS]; // pointers to cmd_data[]
+static char     *cmd_null_string = "";
 
 // complete command string, left untouched
-static  char    cmd_string[MAX_STRING_CHARS];
-static  size_t  cmd_string_len;
-static  size_t  cmd_string_tail;
+static char     cmd_string[MAX_STRING_CHARS];
+static int      cmd_string_len;
 
 // offsets of individual tokens into cmd_string
-static  size_t  cmd_offsets[MAX_STRING_TOKENS];
+static int      cmd_offsets[MAX_STRING_TOKENS];
 
 // sequence of NULL-terminated, normalized tokens
-static  char    cmd_data[MAX_STRING_CHARS];
+static char     cmd_data[MAX_STRING_CHARS];
 
 // normalized command arguments
-static  char    cmd_args[MAX_STRING_CHARS];
+static char     cmd_args[MAX_STRING_CHARS];
 
 int             cmd_optind;
 char            *cmd_optarg;
@@ -853,7 +844,7 @@ from_t Cmd_From(void)
     return cmd_current->from;
 }
 
-size_t Cmd_ArgOffset(int arg)
+int Cmd_ArgOffset(int arg)
 {
     if (arg < 0) {
         return 0;
@@ -864,9 +855,12 @@ size_t Cmd_ArgOffset(int arg)
     return cmd_offsets[arg];
 }
 
-int Cmd_FindArgForOffset(size_t offset)
+int Cmd_FindArgForOffset(int offset)
 {
     int i;
+
+    if (offset > cmd_string_len)
+        return cmd_argc;
 
     for (i = 1; i < cmd_argc; i++) {
         if (offset < cmd_offsets[i]) {
@@ -874,11 +868,6 @@ int Cmd_FindArgForOffset(size_t offset)
         }
     }
     return i - 1;
-}
-
-size_t Cmd_WhiteSpaceTail(void)
-{
-    return cmd_string_tail;
 }
 
 /*
@@ -911,17 +900,8 @@ Cmd_ArgvBuffer
 */
 size_t Cmd_ArgvBuffer(int arg, char *buffer, size_t size)
 {
-    char *s;
-
-    if (arg < 0 || arg >= cmd_argc) {
-        s = cmd_null_string;
-    } else {
-        s = cmd_argv[arg];
-    }
-
-    return Q_strlcpy(buffer, s, size);
+    return Q_strlcpy(buffer, Cmd_Argv(arg), size);
 }
-
 
 /*
 ============
@@ -932,28 +912,12 @@ Returns a single string containing argv(1) to argv(argc()-1)
 */
 char *Cmd_Args(void)
 {
-    int i;
-
-    if (cmd_argc < 2) {
-        return cmd_null_string;
-    }
-
-    cmd_args[0] = 0;
-    for (i = 1; i < cmd_argc - 1; i++) {
-        strcat(cmd_args, cmd_argv[i]);
-        strcat(cmd_args, " ");
-    }
-    strcat(cmd_args, cmd_argv[i]);
-
-    return cmd_args;
+    return Cmd_ArgsFrom(1);
 }
 
 char *Cmd_RawArgs(void)
 {
-    if (cmd_argc < 2) {
-        return cmd_null_string;
-    }
-    return cmd_string + cmd_offsets[1];
+    return Cmd_RawArgsFrom(1);
 }
 
 char *Cmd_RawString(void)
@@ -975,28 +939,15 @@ size_t Cmd_ArgsBuffer(char *buffer, size_t size)
 ============
 Cmd_ArgsFrom
 
-Returns a single string containing argv(1) to argv(from-1)
+Returns a single string containing argv(from) to argv(argc()-1)
 ============
 */
 char *Cmd_ArgsFrom(int from)
 {
-    int i;
-
-    if (from < 0 || from >= cmd_argc) {
-        return cmd_null_string;
-    }
-
-    cmd_args[0] = 0;
-    for (i = from; i < cmd_argc - 1; i++) {
-        strcat(cmd_args, cmd_argv[i]);
-        strcat(cmd_args, " ");
-    }
-    strcat(cmd_args, cmd_argv[i]);
-
-    return cmd_args;
+    return Cmd_ArgsRange(from, cmd_argc - 1);
 }
 
-static char *Cmd_ArgsRange(int from, int to)
+char *Cmd_ArgsRange(int from, int to)
 {
     int i;
 
@@ -1020,27 +971,18 @@ static char *Cmd_ArgsRange(int from, int to)
 
 char *Cmd_RawArgsFrom(int from)
 {
-    size_t offset;
-
     if (from < 0 || from >= cmd_argc) {
         return cmd_null_string;
     }
 
-    offset = cmd_offsets[from];
-
-    return cmd_string + offset;
+    return cmd_string + cmd_offsets[from];
 }
 
 void Cmd_Shift(void)
 {
     int i;
 
-    if (!cmd_argc) {
-        return;
-    }
-
-    if (cmd_argc == 1) {
-        cmd_string[0] = 0;
+    if (cmd_argc < 1) {
         return;
     }
 
@@ -1050,8 +992,8 @@ void Cmd_Shift(void)
         cmd_argv[i] = cmd_argv[i + 1];
     }
 
-    memmove(cmd_string, cmd_string + cmd_offsets[1],
-            MAX_STRING_CHARS - cmd_offsets[1]);
+    cmd_offsets[i] = 0;
+    cmd_argv[i] = NULL;
 }
 
 int Cmd_ParseOptions(const cmd_option_t *opt)
@@ -1159,17 +1101,25 @@ void Cmd_PrintUsage(const cmd_option_t *opt, const char *suffix)
 
 void Cmd_PrintHelp(const cmd_option_t *opt)
 {
+    const cmd_option_t *o;
     char buffer[32];
+    int width = 0;
+
+    for (o = opt; o->sh; o++) {
+        int len = strlen(o->lo);
+        if (o->sh[1] == ':')
+            len += 3 + strlen(o->sh + 2);
+        width = max(width, min(len, 31));
+    }
 
     Com_Printf("\nAvailable options:\n");
     while (opt->sh) {
         if (opt->sh[1] == ':') {
-            Q_concat(buffer, sizeof(buffer),
-                     opt->lo, "=<", opt->sh + 2, ">", NULL);
+            Q_concat(buffer, sizeof(buffer), opt->lo, "=<", opt->sh + 2, ">");
         } else {
             Q_strlcpy(buffer, opt->lo, sizeof(buffer));
         }
-        Com_Printf("-%c | --%-16.16s | %s\n", opt->sh[0], buffer, opt->help);
+        Com_Printf("-%c | --%*s | %s\n", opt->sh[0], -width, buffer, opt->help);
         opt++;
     }
     Com_Printf("\n");
@@ -1182,52 +1132,122 @@ void Cmd_PrintHint(void)
 
 void Cmd_Option_c(const cmd_option_t *opt, xgenerator_t g, genctx_t *ctx, int argnum)
 {
-    if (ctx->partial[0] == '-') {
-        for (; opt->sh; opt++) {
-            if (ctx->count >= ctx->size) {
-                break;
-            }
-            if (ctx->partial[1] == '-') {
-                if (!strncmp(opt->lo, ctx->partial + 2, ctx->length - 2)) {
-                    ctx->matches[ctx->count++] = Z_CopyString(va("--%s", opt->lo));
-                }
-            } else if (!ctx->partial[1] || opt->sh[0] == ctx->partial[1]) {
-                ctx->matches[ctx->count++] = Z_CopyString(va("-%c", opt->sh[0]));
-            }
+    int i;
+
+    for (i = 1; i < argnum; i++) {
+        if (!strcmp(cmd_argv[i], "--")) {
+            if (g)
+                g(ctx);
+            return;
         }
-    } else {
-#if 0
-        if (argnum > 1) {
-            s = cmd_argv[argnum - 1];
-        }
-#endif
-        if (g) {
-            g(ctx);
-        } else if (!ctx->partial[0] && ctx->count < ctx->size) {
-            ctx->matches[ctx->count++] = Z_CopyString("-");
-        }
+    }
+
+    if (ctx->partial[0] != '-' && g) {
+        g(ctx);
+    } else for (; opt->sh; opt++) {
+        Prompt_AddMatch(ctx, va("--%s", opt->lo));
+        Prompt_AddMatch(ctx, va("-%c", opt->sh[0]));
     }
 }
 
+static char *parse_macro(char *out, const char *in)
+{
+    // skip leading spaces
+    while (*in && *in <= ' ')
+        in++;
+
+    if (*in == '{') { // allow ${variable} syntax
+        in++;
+        if (*in == '$') // allow ${$variable} syntax
+            in++;
+        while (*in) {
+            if (*in == '}') {
+                in++;
+                break;
+            }
+            *out++ = *in++;
+        }
+    } else {
+        // parse single word
+        while (*in > ' ') {
+            if (*in == '$') {   // allow $var$ syntax
+                in++;
+                break;
+            }
+            *out++ = *in++;
+        }
+    }
+
+    *out = 0;
+    return (char *)in;
+}
+
+static char *expand_positional(const char *buf)
+{
+    int     arg1, arg2;
+    char    *s;
+
+    if (!strcmp(buf, "@"))
+        return Cmd_Args();
+
+    // parse {arg1-arg2} format for ranges
+    arg1 = strtoul(buf, &s, 10);
+    if (s[0] == '-') {
+        if (s[1]) {
+            arg2 = strtoul(s + 1, &s, 10);
+            if (s[0])
+                return NULL; // second part is not a number
+        } else {
+            arg2 = cmd_argc - 1;
+        }
+        return Cmd_ArgsRange(arg1, arg2);
+    }
+
+    if (s[0] == 0)
+        return Cmd_Argv(arg1);
+
+    return NULL; // first part is not a number
+}
+
+static char *expand_normal(char *buf, int remaining)
+{
+    cmd_macro_t     *macro;
+    cvar_t          *var;
+
+    // check for macros first
+    macro = Cmd_FindMacro(buf);
+    if (macro) {
+        macro->function(buf, remaining);
+        return buf;
+    }
+
+    // than variables
+    var = Cvar_FindVar(buf);
+    if (var && !(var->flags & CVAR_PRIVATE))
+        return var->string;
+
+    // then keywords
+    if (!strcmp(buf, "qt"))
+        return strcpy(buf, "\"");
+
+    if (!strcmp(buf, "sc"))
+        return strcpy(buf, ";");
+
+    return strcpy(buf, "");
+}
 
 /*
 ======================
 Cmd_MacroExpandString
 ======================
 */
-char *Cmd_MacroExpandString(const char *text, qboolean aliasHack)
+char *Cmd_MacroExpandString(const char *text, bool aliasHack)
 {
-    size_t      i, j, len;
-    int         count;
-    qboolean    inquote;
-    char        *scan, *start;
+    int         i, j, k, len, count, remaining;
+    bool        inquote;
+    char        *end, *scan, *start, *result;
     static char expanded[MAX_STRING_CHARS];
-    char        temporary[MAX_STRING_CHARS];
     char        buffer[MAX_STRING_CHARS];
-    char        *token;
-    cmd_macro_t *macro;
-    cvar_t      *var;
-    qboolean    rescan;
 
     len = strlen(text);
     if (len >= MAX_STRING_CHARS) {
@@ -1235,149 +1255,65 @@ char *Cmd_MacroExpandString(const char *text, qboolean aliasHack)
         return NULL;
     }
 
-    scan = memcpy(expanded, text, len + 1);
-
-    inquote = qfalse;
+    scan = (char *)text;
+    inquote = false;
     count = 0;
 
     for (i = 0; i < len; i++) {
-        if (!scan[i]) {
-            break;
-        }
-        if (scan[i] == '"') {
+        if (scan[i] == '"')
             inquote ^= 1;
-        }
-        if (inquote) {
+        if (inquote)
             continue;    // don't expand inside quotes
-        }
-        if (scan[i] != '$') {
+        if (scan[i] != '$')
             continue;
-        }
+
+        // copy off text into static buffer
+        if (scan != expanded)
+            scan = memcpy(expanded, text, len + 1);
 
         // scan out the complete macro
         start = scan + i + 1;
 
-        if (*start == 0) {
+        if (*start == 0)
             break;    // end of string
-        }
 
         // allow $$ escape syntax
         if (*start == '$') {
             memmove(scan + i, start, len - i);
+            len--;
             continue;
         }
-
-        // skip leading spaces
-        while (*start && *start <= 32) {
-            start++;
-        }
-
-        token = temporary;
-
-        if (*start == '{') {
-            // allow ${variable} syntax
-            start++;
-            if (*start == '$') {  // allow ${$variable} syntax
-                start++;
-            }
-            while (*start) {
-                if (*start == '}') {
-                    start++;
-                    break;
-                }
-                *token++ = *start++;
-            }
-        } else {
-            // parse single word
-            while (*start > 32) {
-                if (*start == '$') {  // allow $var$ syntax
-                    start++;
-                    break;
-                }
-                *token++ = *start++;
-            }
-        }
-
-        *token = 0;
-
-        if (token == temporary) {
+        
+        end = parse_macro(buffer, start);
+        if (!buffer[0])
             continue;
-        }
 
-        rescan = qfalse;
-
-        if (aliasHack) {
-            // expand positional parameters only
-            if (!strcmp(temporary, "@")) {
-                token = Cmd_Args();
-            } else {
-                int arg1, arg2;
-                char *s;
-
-                // parse {arg1-arg2} format for ranges
-                arg1 = strtoul(temporary, &s, 10);
-                if (s[0] == '-') {
-                    if (s[1]) {
-                        arg2 = strtoul(s + 1, &s, 10);
-                        if (s[0]) {
-                            continue; // second part is not a number
-                        }
-                    } else {
-                        arg2 = cmd_argc - 1;
-                    }
-                    token = Cmd_ArgsRange(arg1, arg2);
-                } else if (s[0] == 0) {
-                    token = Cmd_Argv(arg1);
-                } else {
-                    continue; // first part is not a number
-                }
-            }
-        } else {
-            // check for macros first
-            macro = Cmd_FindMacro(temporary);
-            if (macro) {
-                macro->function(buffer, MAX_STRING_CHARS - len);
-                token = buffer;
-            } else {
-                // than variables
-                var = Cvar_FindVar(temporary);
-                if (var && !(var->flags & CVAR_PRIVATE)) {
-                    token = var->string;
-                    rescan = qtrue;
-                } else if (!strcmp(temporary, "qt")) {
-                    token = "\"";
-                } else if (!strcmp(temporary, "sc")) {
-                    token = ";";
-                } else {
-                    token = "";
-                }
-            }
-        }
-
-        j = strlen(token);
-        len += j;
-        if (len >= MAX_STRING_CHARS) {
-            Com_Printf("Expanded line exceeded %i chars, discarded.\n",
-                       MAX_STRING_CHARS);
-			Com_Printf("was %s\n", text);
+        k = end - start + 1;
+        remaining = MAX_STRING_CHARS - len + k;
+        
+        result = aliasHack ? expand_positional(buffer) : expand_normal(buffer, remaining);
+        if (!result)
+            continue;
+        
+        j = strlen(result);
+        if (j >= remaining) {
+            Com_Printf("Expanded line exceeded %i chars, discarded.\n", MAX_STRING_CHARS);
             return NULL;
         }
-
-        strncpy(temporary, scan, i);
-        strcpy(temporary + i, token);
-        strcpy(temporary + i + j, start);
-
-        strcpy(expanded, temporary);
-        scan = expanded;
-        if (!rescan) {
-            i += j;
-        }
-        i--;
 
         if (++count == 100) {
             Com_Printf("Macro expansion loop, discarded.\n");
             return NULL;
         }
+
+        memmove(scan + i + j, scan + i + k, len - i - k);
+        memcpy(scan + i, result, j);
+
+        // rescan after variable expansion, but not positional or macro expansion
+        i += (aliasHack || result == buffer ? j : 0) - 1;
+        len += j - k;
+
+        scan[len] = 0;
     }
 
     if (inquote) {
@@ -1396,13 +1332,13 @@ Parses the given string into command line tokens.
 $Cvars will be expanded unless they are in a quoted token
 ============
 */
-void Cmd_TokenizeString(const char *text, qboolean macroExpand)
+void Cmd_TokenizeString(const char *text, bool macroExpand)
 {
-    int     i;
-    char    *data, *start, *dest;
+    size_t  len;
+    char    *data, *dest;
 
 // clear the args from the last string
-    for (i = 0; i < cmd_argc; i++) {
+    for (int i = 0; i < cmd_argc; i++) {
         cmd_argv[i] = NULL;
         cmd_offsets[i] = 0;
     }
@@ -1410,7 +1346,6 @@ void Cmd_TokenizeString(const char *text, qboolean macroExpand)
     cmd_argc = 0;
     cmd_string[0] = 0;
     cmd_string_len = 0;
-    cmd_string_tail = 0;
     cmd_optind = 1;
     cmd_optarg = cmd_optopt = cmd_null_string;
 
@@ -1420,30 +1355,38 @@ void Cmd_TokenizeString(const char *text, qboolean macroExpand)
 
 // macro expand the text
     if (macroExpand) {
-        text = Cmd_MacroExpandString(text, qfalse);
+        text = Cmd_MacroExpandString(text, false);
         if (!text) {
             return;
         }
     }
 
-    cmd_string_len = Q_strlcpy(cmd_string, text, sizeof(cmd_string));
-    if (cmd_string_len >= sizeof(cmd_string)) {
-        Com_Printf("Line exceeded %i chars, discarded.\n", MAX_STRING_CHARS);
-        return;
+// skip any leading whitespace
+    while (*text && *text <= ' ') {
+        text++;
     }
 
 // strip off any trailing whitespace
-    while (cmd_string_len) {
-        if (cmd_string[cmd_string_len - 1] > ' ') {
-            break;
-        }
-        cmd_string[cmd_string_len - 1] = 0;
-        cmd_string_len--;
-        cmd_string_tail++;
+    len = strlen(text);
+    while (len > 0 && text[len - 1] <= ' ') {
+        len--;
+    }
+    if (len >= MAX_STRING_CHARS) {
+        Com_Printf("Line exceeded %i chars, discarded.\n", MAX_STRING_CHARS);
+        return;
+    }
+    if (!len) {
+        return;
     }
 
+// copy off text
+// use memmove because text may overlap with cmd_string
+    memmove(cmd_string, text, len);
+    cmd_string[len] = 0;
+    cmd_string_len = len;
+
     dest = cmd_data;
-    start = data = cmd_string;
+    data = cmd_string;
     while (cmd_argc < MAX_STRING_TOKENS) {
 // skip whitespace up to a /n
         while (*data <= ' ') {
@@ -1457,22 +1400,16 @@ void Cmd_TokenizeString(const char *text, qboolean macroExpand)
         }
 
 // add new argument
-        cmd_offsets[cmd_argc] = data - start;
+        cmd_offsets[cmd_argc] = data - cmd_string;
         cmd_argv[cmd_argc] = dest;
         cmd_argc++;
-
-        if (*data == ';') {
-            data++;
-            *dest++ = ';';
-            *dest++ = 0;
-            continue;
-        }
 
 // parse quoted string
         if (*data == '\"') {
             data++;
             while (*data != '\"') {
                 if (*data == 0) {
+                    *dest = 0;
                     return; // end of data
                 }
                 *dest++ = *data++;
@@ -1487,16 +1424,9 @@ void Cmd_TokenizeString(const char *text, qboolean macroExpand)
             if (*data == '\"') {
                 break;
             }
-            if (*data == ';') {
-                break;
-            }
             *dest++ = *data++;
         }
         *dest++ = 0;
-
-        if (*data == 0) {
-            return; // end of text
-        }
     }
 }
 
@@ -1520,13 +1450,26 @@ static cmd_function_t *Cmd_Find(const char *name)
     return NULL;
 }
 
+static void Cmd_LinkCommand(cmd_function_t *cmd)
+{
+    cmd_function_t *cur;
+    unsigned hash;
+
+    FOR_EACH_CMD(cur)
+        if (strcmp(cmd->name, cur->name) < 0)
+            break;
+    List_Append(&cur->listEntry, &cmd->listEntry);
+
+    hash = Com_HashString(cmd->name, CMD_HASH_SIZE);
+    List_Append(&cmd_hash[hash], &cmd->hashEntry);
+}
+
 static void Cmd_RegCommand(const cmdreg_t *reg)
 {
     cmd_function_t *cmd;
-    unsigned hash;
 
 // fail if the command is a variable name
-    if (Cvar_Exists(reg->name, qfalse)) {
+    if (Cvar_Exists(reg->name, false)) {
         Com_WPrintf("%s: %s already defined as a cvar\n", __func__, reg->name);
         return;
     }
@@ -1548,10 +1491,7 @@ static void Cmd_RegCommand(const cmdreg_t *reg)
     cmd->function = reg->function;
     cmd->completer = reg->completer;
 
-    List_Append(&cmd_functions, &cmd->listEntry);
-
-    hash = Com_HashString(reg->name, CMD_HASH_SIZE);
-    List_Append(&cmd_hash[hash], &cmd->hashEntry);
+    Cmd_LinkCommand(cmd);
 }
 
 /*
@@ -1561,28 +1501,20 @@ Cmd_AddCommand
 */
 void Cmd_AddCommand(const char *name, xcommand_t function)
 {
-    cmdreg_t reg;
-
-    reg.name = name;
-    reg.function = function;
-    reg.completer = NULL;
+    cmdreg_t reg = { .name = name, .function = function };
     Cmd_RegCommand(&reg);
 }
 
 void Cmd_Register(const cmdreg_t *reg)
 {
-    while (reg->name) {
+    for (; reg->name; reg++)
         Cmd_RegCommand(reg);
-        reg++;
-    }
 }
 
 void Cmd_Deregister(const cmdreg_t *reg)
 {
-    while (reg->name) {
+    for (; reg->name; reg++)
         Cmd_RemoveCommand(reg->name);
-        reg++;
-    }
 }
 
 /*
@@ -1600,8 +1532,8 @@ void Cmd_RemoveCommand(const char *name)
         return;
     }
 
-    List_Delete(&cmd->listEntry);
-    List_Delete(&cmd->hashEntry);
+    List_Remove(&cmd->listEntry);
+    List_Remove(&cmd->hashEntry);
     Z_Free(cmd);
 }
 
@@ -1610,11 +1542,9 @@ void Cmd_RemoveCommand(const char *name)
 Cmd_Exists
 ============
 */
-qboolean Cmd_Exists(const char *name)
+bool Cmd_Exists(const char *name)
 {
-    cmd_function_t *cmd = Cmd_Find(name);
-
-    return cmd ? qtrue : qfalse;
+    return Cmd_Find(name);
 }
 
 xcommand_t Cmd_FindFunction(const char *name)
@@ -1635,11 +1565,8 @@ void Cmd_Command_g(genctx_t *ctx)
 {
     cmd_function_t *cmd;
 
-    FOR_EACH_CMD(cmd) {
-        if (!Prompt_AddMatch(ctx, cmd->name)) {
-            break;
-        }
-    }
+    FOR_EACH_CMD(cmd)
+        Prompt_AddMatch(ctx, cmd->name);
 }
 
 void Cmd_ExecuteCommand(cmdbuf_t *buf)
@@ -1648,6 +1575,13 @@ void Cmd_ExecuteCommand(cmdbuf_t *buf)
     cmdalias_t      *a;
     cvar_t          *v;
     char            *text;
+
+    // execute the command line
+    if (!cmd_argc) {
+        return;         // no tokens
+    }
+
+    cmd_current = buf;
 
     // check functions
     cmd = Cmd_Find(cmd_argv[0]);
@@ -1667,7 +1601,7 @@ void Cmd_ExecuteCommand(cmdbuf_t *buf)
             Com_WPrintf("Runaway alias loop\n");
             return;
         }
-        text = Cmd_MacroExpandString(a->value, qtrue);
+        text = Cmd_MacroExpandString(a->value, true);
         if (text) {
             buf->aliasCount++;
             Cbuf_InsertText(buf, text);
@@ -1697,21 +1631,14 @@ A complete command line has been parsed, so try to execute it
 */
 void Cmd_ExecuteString(cmdbuf_t *buf, const char *text)
 {
-    Cmd_TokenizeString(text, qtrue);
-
-    // execute the command line
-    if (!cmd_argc) {
-        return;        // no tokens
-    }
-
+    Cmd_TokenizeString(text, true);
     Cmd_ExecuteCommand(buf);
 }
 
-qerror_t Cmd_ExecuteFile(const char *path, unsigned flags)
+int Cmd_ExecuteFile(const char *path, unsigned flags)
 {
-    char    *f;
-    ssize_t len;
-    qerror_t ret;
+    char *f;
+    int len, ret;
     cmdbuf_t *buf;
 
     len = FS_LoadFileEx(path, (void **)&f, flags, TAG_FILESYSTEM);
@@ -1728,7 +1655,7 @@ qerror_t Cmd_ExecuteFile(const char *path, unsigned flags)
     // sanity check file size after stripping off comments
     len = COM_Compress(f);
     if (len > CMD_BUFFER_SIZE) {
-        ret = Q_ERR_FBIG;
+        ret = Q_ERR(EFBIG);
         goto finish;
     }
 
@@ -1737,8 +1664,8 @@ qerror_t Cmd_ExecuteFile(const char *path, unsigned flags)
     buf = &cmd_buffer;
 
     // check for exec loop
-    if (++buf->aliasCount > ALIAS_LOOP_COUNT) {
-        ret = Q_ERR_RUNAWAY_LOOP;
+    if (buf->aliasCount >= ALIAS_LOOP_COUNT) {
+        ret = Q_ERR_INFINITE_LOOP;
         goto finish;
     }
 
@@ -1750,7 +1677,10 @@ qerror_t Cmd_ExecuteFile(const char *path, unsigned flags)
 
     // everything ok, execute it
     Com_Printf("Execing %s\n", path);
+
+    buf->aliasCount++;
     Cbuf_InsertText(buf, f);
+
     ret = Q_ERR_SUCCESS;
 
 finish:
@@ -1766,37 +1696,27 @@ Cmd_Exec_f
 static void Cmd_Exec_f(void)
 {
     char    buffer[MAX_QPATH];
-    size_t  len;
-    qerror_t ret;
+    int     ret;
 
     if (Cmd_Argc() != 2) {
         Com_Printf("%s <filename> : execute a script file\n", Cmd_Argv(0));
         return;
     }
 
-    len = FS_NormalizePathBuffer(buffer, Cmd_Argv(1), sizeof(buffer));
-    if (len >= sizeof(buffer)) {
-        Q_PrintError("exec", Q_ERR_NAMETOOLONG);
-        return;
-    }
-
-    if (len == 0) {
-        Q_PrintError("exec", Q_ERR_NAMETOOSHORT);
-        return;
+    if (FS_NormalizePathBuffer(buffer, Cmd_Argv(1), sizeof(buffer)) >= sizeof(buffer)) {
+        ret = Q_ERR(ENAMETOOLONG);
+        goto fail;
     }
 
     ret = Cmd_ExecuteFile(buffer, 0);
-    if (ret == Q_ERR_NOENT && COM_CompareExtension(buffer, ".cfg")) {
-        // try with .cfg extension
-        len = Q_strlcat(buffer, ".cfg", sizeof(buffer));
-        if (len >= sizeof(buffer)) {
-            Q_PrintError("exec", Q_ERR_NAMETOOLONG);
-            return;
-        }
 
+    // try with .cfg extension
+    if (ret == Q_ERR(ENOENT) && COM_CompareExtension(buffer, ".cfg") && strlen(buffer) < sizeof(buffer) - 4) {
+        strcat(buffer, ".cfg");
         ret = Cmd_ExecuteFile(buffer, 0);
     }
 
+fail:
     if (ret) {
         Com_Printf("Couldn't exec %s: %s\n", buffer, Q_ErrorString(ret));
     }
@@ -1830,6 +1750,7 @@ static const cmd_option_t o_echo[] = {
     { "h", "help", "display this message" },
     { "e", "escapes", "enable interpretation of backslash escapes" },
     { "c:color", "color", "print text in this color" },
+    { "l:level", "level", "print text at this message level" },
     { "n", "no-newline", "do not output the trailing newline" },
     { NULL }
 };
@@ -1866,7 +1787,12 @@ static char *unescape_string(char *dst, const char *src)
                 src += 2;
                 break;
             default:
-                *p++ = src[1];
+                if (src[0] >= '0' && src[1] <= '7') {
+                    *p++ = strtoul(&src[1], (char **)&src, 8);
+                    src -= 2;
+                } else {
+                    *p++ = src[1];
+                }
                 break;
             }
             src += 2;
@@ -1882,7 +1808,8 @@ static char *unescape_string(char *dst, const char *src)
 static void Cmd_EchoEx_f(void)
 {
     char buffer[MAX_STRING_CHARS], *s;
-    qboolean escapes = qfalse;
+    bool escapes = false;
+    print_type_t level = PRINT_ALL;
     color_index_t color = COLOR_NONE;
     const char *newline = "\n";
     int c;
@@ -1895,10 +1822,23 @@ static void Cmd_EchoEx_f(void)
             Cmd_PrintHelp(o_echo);
             return;
         case 'e':
-            escapes = qtrue;
+            escapes = true;
             break;
         case 'c':
-            color = Com_ParseColor(cmd_optarg, COLOR_NONE);
+            color = Com_ParseColor(cmd_optarg);
+            break;
+        case 'l':
+            switch (Q_tolower(*cmd_optarg)) {
+            case 'a': level = PRINT_ALL;       break;
+            case 't': level = PRINT_TALK;      break;
+            case 'd': level = PRINT_DEVELOPER; break;
+            case 'w': level = PRINT_WARNING;   break;
+            case 'e': level = PRINT_ERROR;     break;
+            case 'n': level = PRINT_NOTICE;    break;
+            default:
+                Com_Printf("Bad print level: %s\n", cmd_optarg);
+                return;
+            }
             break;
         case 'n':
             newline = "";
@@ -1908,13 +1848,13 @@ static void Cmd_EchoEx_f(void)
         }
     }
 
-    s = Cmd_RawArgsFrom(cmd_optind);
+    s = COM_StripQuotes(Cmd_RawArgsFrom(cmd_optind));
     if (escapes) {
         s = unescape_string(buffer, s);
     }
 
     Com_SetColor(color);
-    Com_Printf("%s%s", s, newline);
+    Com_LPrintf(level, "%s%s", s, newline);
     Com_SetColor(COLOR_NONE);
 }
 
@@ -1975,15 +1915,13 @@ static void Cmd_MacroList_f(void)
 
 static void Cmd_Text_f(void)
 {
-    Cbuf_AddText(cmd_current, Cmd_Args());
-    Cbuf_AddText(cmd_current, "\n");
+    Cbuf_InsertText(cmd_current, Cmd_Args());
 }
 
 static void Cmd_Complete_f(void)
 {
     cmd_function_t *cmd;
     char *name;
-    unsigned hash;
     size_t len;
 
     if (cmd_argc < 2) {
@@ -1994,7 +1932,7 @@ static void Cmd_Complete_f(void)
     name = cmd_argv[1];
 
 // fail if the command is a variable name
-    if (Cvar_Exists(name, qtrue)) {
+    if (Cvar_Exists(name, true)) {
         Com_Printf("%s is already defined as a cvar\n", name);
         return;
     }
@@ -2013,10 +1951,7 @@ static void Cmd_Complete_f(void)
     cmd->function = NULL;
     cmd->completer = NULL;
 
-    List_Append(&cmd_functions, &cmd->listEntry);
-
-    hash = Com_HashString(name, CMD_HASH_SIZE);
-    List_Append(&cmd_hash[hash], &cmd->hashEntry);
+    Cmd_LinkCommand(cmd);
 }
 
 static const cmdreg_t c_cmd[] = {

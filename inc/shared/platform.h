@@ -20,6 +20,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // platform.h -- platform-specific definitions
 //
 
+#pragma once
+
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -28,12 +30,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <direct.h>
 #else
 #include <unistd.h>
-#endif
-
-#ifdef _WIN32
-#define PRIz    "Iu"
-#else
-#define PRIz    "zu"
 #endif
 
 #ifdef _WIN32
@@ -50,27 +46,16 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define PATH_SEP_STRING     "/"
 #endif
 
-#if (defined _WIN32)
-#define LIBGL   "opengl32"
-#define LIBAL   "openal32"
-#elif (defined __OpenBSD__)
-#define LIBGL   "libGL.so"
-#define LIBAL   "libopenal.so"
-#else
-#define LIBGL   "libGL.so.1"
-#define LIBAL   "libopenal.so.1"
-#endif
-
 #ifdef _WIN32
 #define os_mkdir(p)         _mkdir(p)
 #define os_unlink(p)        _unlink(p)
-#define os_stat(p, s)       _stat(p, s)
-#define os_fstat(f, s)      _fstat(f, s)
+#define os_stat(p, s)       _stat64(p, s)
+#define os_fstat(f, s)      _fstat64(f, s)
 #define os_fileno(f)        _fileno(f)
-#define os_access(p, m)     _access(p, m)
+#define os_access(p, m)     _access(p, (m) & ~X_OK)
 #define Q_ISREG(m)          (((m) & _S_IFMT) == _S_IFREG)
 #define Q_ISDIR(m)          (((m) & _S_IFMT) == _S_IFDIR)
-#define Q_STATBUF           struct _stat
+#define Q_STATBUF           struct _stat64
 #else
 #define os_mkdir(p)         mkdir(p, 0775)
 #define os_unlink(p)        unlink(p)
@@ -83,6 +68,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define Q_STATBUF           struct stat
 #endif
 
+#if (defined _WIN32) && !(defined __MINGW32__)
+#define os_fseek(f, o, w)   _fseeki64(f, o, w)
+#define os_ftell(f)         _ftelli64(f)
+#else
+#define os_fseek(f, o, w)   fseeko(f, o, w)
+#define os_ftell(f)         ftello(f)
+#endif
+
 #ifndef F_OK
 #define F_OK    0
 #define X_OK    1
@@ -92,7 +85,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #ifdef __GNUC__
 
+#if (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 4)
+#define q_printf(f, a)      __attribute__((format(gnu_printf, f, a)))
+#else
 #define q_printf(f, a)      __attribute__((format(printf, f, a)))
+#endif
 #define q_noreturn          __attribute__((noreturn))
 #define q_noinline          __attribute__((noinline))
 #define q_malloc            __attribute__((malloc))
@@ -109,6 +106,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #else
 #define q_offsetof(t, m)    ((size_t)&((t *)0)->m)
 #endif
+#define q_alignof(t)        __alignof__(t)
 
 #if USE_GAME_ABI_HACK
 #define q_gameabi           __attribute__((callee_pop_aggregate_return(0)))
@@ -132,9 +130,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define q_malloc
 #define q_sentinel
 
-#define q_likely(x)         !!(x)
-#define q_unlikely(x)       !!(x)
+#define q_likely(x)         (x)
+#define q_unlikely(x)       (x)
 #define q_offsetof(t, m)    ((size_t)&((t *)0)->m)
+#ifdef _MSC_VER
+#define q_alignof(t)        __alignof(t)
+#else
+#define q_alignof(t)        1
+#endif
 
 #define q_gameabi
 

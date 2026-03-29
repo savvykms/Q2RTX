@@ -85,9 +85,9 @@ typedef struct ac_cvar_s {
 } ac_cvar_t;
 
 typedef struct {
-    qboolean connected;
-    qboolean ready;
-    qboolean ping_pending;
+    bool connected;
+    bool ready;
+    bool ping_pending;
     unsigned last_ping;
     netstream_t stream;
     size_t msglen;
@@ -108,10 +108,10 @@ typedef struct {
     char hashlist_name[MAX_QPATH];
 } ac_static_t;
 
-#define ACP_BLOCKPLAY   (1 << 0)
+#define ACP_BLOCKPLAY   BIT(0)
 
-#define ACH_REQUIRED    (1 << 0)
-#define ACH_NEGATIVE    (1 << 1)
+#define ACH_REQUIRED    BIT(0)
+#define ACH_NEGATIVE    BIT(1)
 
 #define AC_PROTOCOL_VERSION     0xAC03
 
@@ -288,7 +288,6 @@ badhash:
 static void AC_ParseCvar(char *data, int linenum, const char *path)
 {
     char *values[256], *p;
-    byte lengths[256];
     char *name, *opstr, *val, *def;
     size_t len, namelen, vallen, deflen;
     ac_cvar_t *cvar;
@@ -350,31 +349,35 @@ static void AC_ParseCvar(char *data, int linenum, const char *path)
             Com_WPrintf("ANTICHEAT: Too long value on line %d in %s\n", linenum, path);
             return;
         }
-        values[num_values] = val;
-        lengths[num_values++] = (byte)(len + 1);
+        values[num_values++] = val;
         if (!p) {
             break;
         }
         val = p + 1;
     }
 
-    Z_TagReserve(sizeof(*cvar) + num_values * sizeof(char *) +
-                 namelen + 1 + deflen + 1 + vallen + 1, TAG_SERVER);
-    cvar = Z_ReservedAlloc(sizeof(*cvar));
-    cvar->values = Z_ReservedAlloc(num_values * sizeof(char *));
-    cvar->name = Z_ReservedAlloc(namelen + 1);
-    memcpy(cvar->name, name, namelen + 1);
-    cvar->def = Z_ReservedAlloc(deflen + 1);
-    memcpy(cvar->def, def, deflen + 1);
+    cvar = SV_Malloc(sizeof(*cvar));
+    cvar->values = SV_Malloc(num_values * sizeof(char *));
+    cvar->name = SV_CopyString(name);
+    cvar->def = SV_CopyString(def);
     cvar->num_values = num_values;
     for (i = 0; i < num_values; i++) {
-        cvar->values[i] = Z_ReservedAlloc(lengths[i]);
-        memcpy(cvar->values[i], values[i], lengths[i]);
+        cvar->values[i] = SV_CopyString(values[i]);
     }
     cvar->op = op->code;
     cvar->next = acs.cvars;
     acs.cvars = cvar;
     acs.num_cvars++;
+}
+
+static void AC_FreeCvar(ac_cvar_t *cvar)
+{
+    for (int i = 0; i < cvar->num_values; i++)
+        Z_Free(cvar->values[i]);
+    Z_Free(cvar->values);
+    Z_Free(cvar->def);
+    Z_Free(cvar->name);
+    Z_Free(cvar);
 }
 
 static void AC_ParseToken(char *data, int linenum, const char *path)
@@ -388,19 +391,19 @@ static void AC_ParseToken(char *data, int linenum, const char *path)
     acs.tokens = tok;
 }
 
-static qboolean AC_ParseFile(const char *path, ac_parse_t parse, int depth)
+static bool AC_ParseFile(const char *path, ac_parse_t parse, int depth)
 {
     char *raw, *data, *p;
     int linenum = 1;
-    qerror_t ret;
+    int ret;
 
     ret = FS_LoadFile(path, (void **)&raw);
     if (!raw) {
-        if (ret != Q_ERR_NOENT || depth) {
+        if (ret != Q_ERR(ENOENT) || depth) {
             Com_WPrintf("ANTICHEAT: Could not %s %s: %s\n",
                         depth ? "include" : "load", path, Q_ErrorString(ret));
         }
-        return qfalse;
+        return false;
     }
 
     data = raw;
@@ -444,7 +447,7 @@ static qboolean AC_ParseFile(const char *path, ac_parse_t parse, int depth)
 
     FS_FreeFile(raw);
 
-    return qtrue;
+    return true;
 }
 
 static void AC_LoadChecks(void)
@@ -487,7 +490,7 @@ static void AC_FreeChecks(void)
 
     for (c = acs.cvars; c; c = cn) {
         cn = c->next;
-        Z_Free(c);
+        AC_FreeCvar(c);
     }
     acs.cvars = NULL;
 
@@ -536,7 +539,7 @@ static void AC_Drop(void)
     }
 
     FOR_EACH_CLIENT(cl) {
-        cl->ac_valid = qfalse;
+        cl->ac_valid = false;
         cl->ac_file_failures = 0;
     }
 
@@ -678,7 +681,7 @@ static void AC_ParseViolation(void)
                     cl->name, showreason);
 
         Com_Printf("ANTICHEAT VIOLATION: %s[%s] was kicked: %s\n",
-                   cl->name, NET_AdrToString(&cl->netchan->remote_address), reason);
+                   cl->name, NET_AdrToString(&cl->netchan.remote_address), reason);
 
         if (clientreason[0])
             SV_ClientPrintf(cl, PRINT_HIGH, "%s\n", clientreason);
@@ -695,7 +698,7 @@ static void AC_ParseViolation(void)
 
     Com_Printf("ANTICHEAT DISCONNECT: %s[%s] disconnected from "
                "anticheat server\n", cl->name,
-               NET_AdrToString(&cl->netchan->remote_address));
+               NET_AdrToString(&cl->netchan.remote_address));
 
     if (ac_client_disconnect_action->integer == 1) {
         AC_Announce(cl, "%s lost connection to anticheat server.\n", cl->name);
@@ -705,7 +708,7 @@ static void AC_ParseViolation(void)
 
     AC_Announce(cl, "%s lost connection to anticheat server, "
                 "client is no longer valid.\n", cl->name);
-    cl->ac_valid = qfalse;
+    cl->ac_valid = false;
 }
 
 static void AC_ParseClientAck(void)
@@ -730,7 +733,7 @@ static void AC_ParseClientAck(void)
 
     Com_DPrintf("ANTICHEAT: %s for %s\n", __func__, cl->name);
     cl->ac_client_type = MSG_ReadByte();
-    cl->ac_valid = qtrue;
+    cl->ac_valid = true;
 }
 
 static void AC_ParseFileViolation(void)
@@ -778,7 +781,7 @@ static void AC_ParseFileViolation(void)
     }
 
     Com_Printf("ANTICHEAT FILE VIOLATION: %s[%s] has a modified %s [%s]\n",
-               cl->name, NET_AdrToString(&cl->netchan->remote_address), path, hash);
+               cl->name, NET_AdrToString(&cl->netchan.remote_address), path, hash);
     switch (action) {
     case 0:
         AC_Announce(cl, "%s was kicked for modified %s\n", cl->name, path);
@@ -818,7 +821,7 @@ static void AC_ParseFileViolation(void)
 
 static void AC_ParseReady(void)
 {
-    ac.ready = qtrue;
+    ac.ready = true;
     ac.last_ping = svs.realtime;
     acs.retry_backoff = AC_DEFAULT_BACKOFF;
     Com_Printf("ANTICHEAT: Ready to serve anticheat clients.\n");
@@ -847,7 +850,7 @@ static void AC_ParseQueryReply(void)
     cl->ac_query_sent = AC_QUERY_DONE;
     if (valid == 1) {
         cl->ac_client_type = type;
-        cl->ac_valid = qtrue;
+        cl->ac_valid = true;
     }
 
     if (cl->state < cs_connected || cl->state > cs_primed) {
@@ -892,7 +895,7 @@ static void AC_ParseError(void)
     AC_Disable();
 }
 
-static qboolean AC_ParseMessage(void)
+static bool AC_ParseMessage(void)
 {
     uint16_t msglen;
     int cmd;
@@ -900,23 +903,23 @@ static qboolean AC_ParseMessage(void)
     // parse msglen
     if (!ac.msglen) {
         if (!FIFO_TryRead(&ac.stream.recv, &msglen, 2)) {
-            return qfalse;
+            return false;
         }
         if (!msglen) {
-            return qtrue;
+            return true;
         }
         msglen = LittleShort(msglen);
         if (msglen > AC_RECV_SIZE) {
             Com_EPrintf("ANTICHEAT: Oversize message: %u bytes\n", msglen);
             AC_Drop();
-            return qfalse;
+            return false;
         }
         ac.msglen = msglen;
     }
 
     // read this message
     if (!FIFO_ReadMessage(&ac.stream.recv, ac.msglen)) {
-        return qfalse;
+        return false;
     }
 
     ac.msglen = 0;
@@ -940,24 +943,24 @@ static qboolean AC_ParseMessage(void)
         break;
     case ACS_ERROR:
         AC_ParseError();
-        return qfalse;
+        return false;
     case ACS_NOACCESS:
         Com_WPrintf("ANTICHEAT: You do not have permission to "
                     "use the anticheat server. Anticheat disabled.\n");
         AC_Disable();
-        return qfalse;
+        return false;
     case ACS_UPDATE_REQUIRED:
         Com_WPrintf("ANTICHEAT: The anticheat server is no longer "
                     "compatible with this version of " APPLICATION ". "
                     "Please make sure you are using the latest " APPLICATION " version. "
                     "Anticheat disabled.\n");
         AC_Disable();
-        return qfalse;
+        return false;
     case ACS_DISCONNECT:
         AC_ParseDisconnect();
-        return qfalse;
+        return false;
     case ACS_PONG:
-        ac.ping_pending = qfalse;
+        ac.ping_pending = false;
         ac.last_ping = svs.realtime;
         break;
     default:
@@ -965,15 +968,15 @@ static qboolean AC_ParseMessage(void)
                     "sure you are using the latest " APPLICATION " version. "
                     "Anticheat disabled.\n", cmd);
         AC_Disable();
-        return qfalse;
+        return false;
     }
 
     if (msg_read.readcount > msg_read.cursize) {
-        Com_WPrintf("ANTICHEAT: Read %"PRIz" bytes past end of message %d\n",
+        Com_WPrintf("ANTICHEAT: Read %zu bytes past end of message %d\n",
                     msg_read.readcount - msg_read.cursize, cmd);
     }
 
-    return qtrue;
+    return true;
 }
 
 /*
@@ -1017,27 +1020,27 @@ static void AC_ClientQuery(client_t *cl)
     AC_Write(__func__);
 }
 
-qboolean AC_ClientBegin(client_t *cl)
+bool AC_ClientBegin(client_t *cl)
 {
     if (!ac_required->integer) {
-        return qtrue; // anticheat is not in use
+        return true; // anticheat is not in use
     }
 
     if (cl->ac_required == AC_EXEMPT) {
-        return qtrue; // client is EXEMPT
+        return true; // client is EXEMPT
     }
 
     if (cl->ac_valid) {
-        return qtrue; // client is VALID
+        return true; // client is VALID
     }
 
     if (cl->ac_query_sent == AC_QUERY_UNSENT && ac.ready) {
         AC_ClientQuery(cl);
-        return qfalse; // not yet QUERIED
+        return false; // not yet QUERIED
     }
 
     if (cl->ac_required != AC_REQUIRED) {
-        return qtrue; // anticheat is NOT REQUIRED
+        return true; // anticheat is NOT REQUIRED
     }
 
     if (ac.ready) {
@@ -1045,26 +1048,26 @@ qboolean AC_ClientBegin(client_t *cl)
         // AFTER QUERY, anticheat is REQUIRED
         Com_Printf("ANTICHEAT: Rejected connecting client %s[%s], "
                    "no anticheat response.\n", cl->name,
-                   NET_AdrToString(&cl->netchan->remote_address));
+                   NET_AdrToString(&cl->netchan.remote_address));
         SV_ClientPrintf(cl, PRINT_HIGH, "%s\n", ac_message->string);
         SV_DropClient(cl, NULL);
-        return qfalse;
+        return false;
     }
 
     if (ac_error_action->integer == 0) {
-        return qtrue; // error action is ALLOW
+        return true; // error action is ALLOW
     }
 
     // anticheat server connection is DOWN, client is INVALID,
     // anticheat is REQUIRED, error action is DENY
     Com_Printf("ANTICHEAT: Rejected connecting client %s[%s], "
                "no connection to anticheat server.\n", cl->name,
-               NET_AdrToString(&cl->netchan->remote_address));
+               NET_AdrToString(&cl->netchan.remote_address));
     SV_ClientPrintf(cl, PRINT_HIGH,
                     "This server is unable to take new connections right now. "
                     "Please try again later.\n");
     SV_DropClient(cl, NULL);
-    return qfalse;
+    return false;
 }
 
 void AC_ClientAnnounce(client_t *cl)
@@ -1128,7 +1131,7 @@ char *AC_ClientConnect(client_t *cl)
 void AC_ClientDisconnect(client_t *cl)
 {
     cl->ac_query_sent = AC_QUERY_UNSENT;
-    cl->ac_valid = qfalse;
+    cl->ac_valid = false;
 
     if (!ac.ready)
         return;
@@ -1183,17 +1186,13 @@ STARTUP STUFF
 
 static void AC_Spin(void)
 {
-    // sleep on stdin and AC server socket
-    NET_Sleepv(100,
-#ifndef _WIN32
-               STDIN_FILENO,
-#endif
-               ac.stream.socket, -1);
+    // sleep on AC server socket
+    NET_Sleep1(100, ac.stream.socket);
     Sys_RunConsole();
     AC_Run();
 }
 
-static qboolean AC_Flush(void)
+static bool AC_Flush(void)
 {
     byte *src = msg_write.data;
     size_t ret, len = msg_write.cursize;
@@ -1201,7 +1200,7 @@ static qboolean AC_Flush(void)
     SZ_Clear(&msg_write);
 
     if (!ac.connected) {
-        return qfalse;
+        return false;
     }
 
     while (1) {
@@ -1220,12 +1219,12 @@ static qboolean AC_Flush(void)
         do {
             AC_Spin();
             if (!ac.connected) {
-                return qfalse;
+                return false;
             }
         } while (FIFO_Usage(&ac.stream.send) > AC_SEND_SIZE / 2);
     }
 
-    return qtrue;
+    return true;
 }
 
 static void AC_WriteString(const char *s)
@@ -1292,7 +1291,7 @@ static void AC_SendPrefs(void)
 static void AC_SendPing(void)
 {
     ac.last_ping = svs.realtime;
-    ac.ping_pending = qtrue;
+    ac.ping_pending = true;
 
     MSG_WriteShort(1);
     MSG_WriteByte(ACC_PING);
@@ -1345,7 +1344,7 @@ static void AC_CheckTimeouts(void)
         }
         if (svs.realtime - cl->ac_query_time > 5000) {
             Com_WPrintf("ANTICHEAT: Query timed out for %s, possible network problem.\n", cl->name);
-            cl->ac_valid = qfalse;
+            cl->ac_valid = false;
             sv_client = cl;
             sv_player = cl->edict;
             SV_Begin_f();
@@ -1355,7 +1354,7 @@ static void AC_CheckTimeouts(void)
     }
 }
 
-static qboolean AC_Reconnect(void)
+static bool AC_Reconnect(void)
 {
     netadr_t address;
 
@@ -1365,9 +1364,9 @@ static qboolean AC_Reconnect(void)
         goto fail;
     }
 
-    if (NET_Connect(&address, &ac.stream) == NET_ERROR) {
-        Com_EPrintf("ANTICHEAT: %s to %s.\n",
-                    NET_ErrorString(), NET_AdrToString(&address));
+    if (NET_Connect(&address, &ac.stream)) {
+        Com_EPrintf("ANTICHEAT: Unable to connect to %s.\n",
+                    NET_AdrToString(&address));
         goto fail;
     }
 
@@ -1376,12 +1375,12 @@ static qboolean AC_Reconnect(void)
     ac.stream.recv.data = ac_recv_buffer;
     ac.stream.recv.size = AC_RECV_SIZE;
     acs.retry_time = 0;
-    return qtrue;
+    return true;
 
 fail:
     acs.retry_backoff += 60;
     AC_Retry();
-    return qfalse;
+    return false;
 }
 
 
@@ -1407,7 +1406,7 @@ void AC_Run(void)
         ret = NET_RunConnect(&ac.stream);
         if (ret == NET_OK) {
             Com_Printf("ANTICHEAT: Connected to anticheat server!\n");
-            ac.connected = qtrue;
+            ac.connected = true;
             AC_SendHello();
         }
     }
@@ -1426,6 +1425,7 @@ void AC_Run(void)
     case NET_ERROR:
         Com_EPrintf("ANTICHEAT: %s to %s.\n", NET_ErrorString(),
                     NET_AdrToString(&ac.stream.address));
+        // fall through
     case NET_CLOSED:
         AC_Drop();
         break;
@@ -1576,7 +1576,7 @@ void AC_Info_f(void)
         filesubstring = Cmd_Argv(2);
 
         if (COM_IsUint(substring)) {
-            clientID = atoi(substring);
+            clientID = Q_atoi(substring);
             if (clientID < 0 || clientID >= sv_maxclients->integer) {
                 Com_Printf("Invalid client ID.\n");
                 return;

@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef COMMON_H
-#define COMMON_H
+#pragma once
 
 #include "common/cmd.h"
 #include "common/utils.h"
@@ -50,8 +49,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define CONST_STR_LEN(x) x, x ? sizeof(x) - 1 : 0
 
-#define __STRINGIFY(x)  #x
-#define STRINGIFY(x)    __STRINGIFY(x)
+#define STRINGIFY2(x)   #x
+#define STRINGIFY(x)    STRINGIFY2(x)
 
 typedef struct {
     const char *name;
@@ -80,12 +79,8 @@ void        Com_EndRedirect(void);
 
 void        Com_AbortFunc(void (*func)(void *), void *arg);
 
-#ifdef _WIN32
-void        Com_AbortFrame(void);
-#endif
-
-char        *Com_GetLastError(void);
 void        Com_SetLastError(const char *msg);
+const char  *Com_GetLastError(void);
 
 void        Com_Quit(const char *reason, error_type_t type) q_noreturn;
 
@@ -113,7 +108,7 @@ void        Com_AddConfigFile(const char *name, unsigned flags);
 #define COM_DEDICATED   1
 #endif
 
-#ifdef _DEBUG
+#if USE_DEBUG
 #define Com_DPrintf(...) \
     if (developer && developer->integer > 0) \
         Com_LPrintf(PRINT_DEVELOPER, __VA_ARGS__)
@@ -127,15 +122,17 @@ void        Com_AddConfigFile(const char *name, unsigned flags);
     if (developer && developer->integer > 3) \
         Com_LPrintf(PRINT_DEVELOPER, __VA_ARGS__)
 #else
-#define Com_DPrintf(...)
-#define Com_DDPrintf(...)
-#define Com_DDDPrintf(...)
-#define Com_DDDDPrintf(...)
+#define Com_DPrintf(...) ((void)0)
+#define Com_DDPrintf(...) ((void)0)
+#define Com_DDDPrintf(...) ((void)0)
+#define Com_DDDDPrintf(...) ((void)0)
 #endif
 
-extern cvar_t  *z_perturb;
+#if USE_TESTS
+extern cvar_t   *z_perturb;
+#endif
 
-#ifdef _DEBUG
+#if USE_DEBUG
 extern cvar_t   *developer;
 #endif
 extern cvar_t   *dedicated;
@@ -177,10 +174,8 @@ extern const char   com_version_string[];
 extern unsigned     com_framenum;
 extern unsigned     com_eventTime; // system time of the last event
 extern unsigned     com_localTime; // milliseconds since Q2 startup
-extern qboolean     com_initialized;
+extern bool         com_initialized;
 extern time_t       com_startTime;
 
 void Qcommon_Init(int argc, char **argv);
 void Qcommon_Frame(void);
-
-#endif // COMMON_H

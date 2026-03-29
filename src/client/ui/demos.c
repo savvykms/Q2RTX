@@ -48,7 +48,7 @@ DEMOS MENU
 
 typedef struct {
     unsigned    type;
-    size_t      size;
+    int64_t     size;
     time_t      mtime;
     char        name[1];
 } demoEntry_t;
@@ -58,12 +58,12 @@ typedef struct m_demos_s {
     menuList_t      list;
     int             numDirs;
     uint8_t         hash[16];
-    char    browse[MAX_OSPATH];
-    int     selection;
-    int     year;
-    int     widest_map, widest_pov;
-    size_t  total_bytes;
-    char    status[32];
+    char            browse[MAX_OSPATH];
+    int             selection;
+    int             year;
+    int             widest_map, widest_pov;
+    uint64_t        total_bytes;
+    char            status[32];
 } m_demos_t;
 
 static m_demos_t    m_demos;
@@ -100,7 +100,7 @@ static void BuildName(const file_info_t *info, char **cache)
         }
         *cache = s;
     } else {
-        Q_concat(buffer, sizeof(buffer), m_demos.browse, "/", info->name, NULL);
+        Q_concat(buffer, sizeof(buffer), m_demos.browse, "/", info->name);
         CL_GetDemoInfo(buffer, &demo);
         if (demo.mvd) {
             strcpy(demo.pov, DEMO_MVD_POV);
@@ -123,7 +123,7 @@ static void BuildName(const file_info_t *info, char **cache)
 
     // format date
     len = 0;
-    if ((tm = localtime(&info->mtime)) != NULL) {
+    if ((tm = localtime(&(time_t){info->mtime})) != NULL) {
         if (tm->tm_year == m_demos.year) {
             len = strftime(date, sizeof(date), "%b %d %H:%M", tm);
         } else {
@@ -161,12 +161,10 @@ static void BuildDir(const char *name, int type)
 static char *LoadCache(void **list)
 {
     char buffer[MAX_OSPATH], *cache;
-    int i;
-    size_t len;
+    int i, len;
     uint8_t hash[16];
 
-    len = Q_concat(buffer, sizeof(buffer), m_demos.browse, "/" COM_DEMOCACHE_NAME, NULL);
-    if (len >= sizeof(buffer)) {
+    if (Q_concat(buffer, sizeof(buffer), m_demos.browse, "/" COM_DEMOCACHE_NAME) >= sizeof(buffer)) {
         return NULL;
     }
     len = FS_LoadFileEx(buffer, (void **)&cache, FS_TYPE_REAL | FS_PATH_GAME, TAG_FILESYSTEM);
@@ -180,6 +178,9 @@ static char *LoadCache(void **list)
     for (i = 0; i < 16; i++) {
         int c1 = Q_charhex(cache[i * 2 + 0]);
         int c2 = Q_charhex(cache[i * 2 + 1]);
+        if (c1 == -1 || c2 == -1) {
+            goto fail;
+        }
         hash[i] = (c1 << 4) | c2;
     }
 
@@ -206,17 +207,14 @@ static void WriteCache(void)
     int i;
     char *map, *pov;
     demoEntry_t *e;
-    size_t len;
 
     if (m_demos.list.numItems == m_demos.numDirs) {
         return;
     }
-
-    len = Q_concat(buffer, sizeof(buffer), m_demos.browse, "/" COM_DEMOCACHE_NAME, NULL);
-    if (len >= sizeof(buffer)) {
+    if (Q_concat(buffer, sizeof(buffer), m_demos.browse, "/" COM_DEMOCACHE_NAME) >= sizeof(buffer)) {
         return;
     }
-    FS_FOpenFile(buffer, &f, FS_MODE_WRITE);
+    FS_OpenFile(buffer, &f, FS_MODE_WRITE);
     if (!f) {
         return;
     }
@@ -232,7 +230,7 @@ static void WriteCache(void)
         pov = UI_GetColumn(e->name, COL_POV);
         FS_FPrintf(f, "%s\\%s\\", map, pov);
     }
-    FS_FCloseFile(f);
+    FS_CloseFile(f);
 }
 
 static void CalcHash(void **list)
@@ -293,6 +291,7 @@ static void BuildList(void)
                            FS_SEARCH_DIRSONLY, &numDirs);
     demolist = FS_ListFiles(m_demos.browse, DEMO_EXTENSIONS, flags |
                             FS_SEARCH_EXTRAINFO, &numDemos);
+    numDemos = min(numDemos, MAX_LISTED_FILES - numDirs);
 
     // alloc entries
     m_demos.list.items = UI_Malloc(sizeof(demoEntry_t *) * (numDirs + numDemos + 1));
@@ -370,8 +369,7 @@ static void FreeList(void)
         for (i = 0; i < m_demos.list.numItems; i++) {
             Z_Free(m_demos.list.items[i]);
         }
-        Z_Free(m_demos.list.items);
-        m_demos.list.items = NULL;
+        Z_Freep((void**)&m_demos.list.items);
         m_demos.list.numItems = 0;
     }
 }
@@ -409,6 +407,17 @@ static menuSound_t LeaveDirectory(void)
     return QMS_OUT;
 }
 
+static bool FileNameOk(const char *s)
+{
+    while (*s) {
+        if (*s == '\n' || *s == '"' || *s == ';') {
+            return false;
+        }
+        s++;
+    }
+    return true;
+}
+
 static menuSound_t EnterDirectory(demoEntry_t *e)
 {
     size_t  baselen, len;
@@ -416,6 +425,9 @@ static menuSound_t EnterDirectory(demoEntry_t *e)
     baselen = strlen(m_demos.browse);
     len = strlen(e->name);
     if (baselen + 1 + len >= sizeof(m_demos.browse)) {
+        return QMS_BEEP;
+    }
+    if (!FileNameOk(e->name)) {
         return QMS_BEEP;
     }
 
@@ -434,17 +446,13 @@ static menuSound_t EnterDirectory(demoEntry_t *e)
 
 static menuSound_t PlayDemo(demoEntry_t *e)
 {
-    char    buffer[MAX_STRING_CHARS];
-    size_t  len;
-
-    len = Q_snprintf(buffer, sizeof(buffer), "demo \"%s/%s\"\n",
-                     strcmp(m_demos.browse, "/") ? m_demos.browse : "",
-                     e->name);
-    if (len >= sizeof(buffer)) {
+    if (strlen(m_demos.browse) + 1 + strlen(e->name) >= sizeof(m_demos.browse)) {
         return QMS_BEEP;
     }
-
-    Cbuf_AddText(&cmd_buffer, buffer);
+    if (!FileNameOk(e->name)) {
+        return QMS_BEEP;
+    }
+    Cbuf_AddText(&cmd_buffer, va("demo \"%s/%s\"\n", m_demos.browse, e->name));
     return QMS_SILENT;
 }
 
@@ -607,6 +615,7 @@ static void Expose(menuFrameWork_t *self)
 
 static void Free(menuFrameWork_t *self)
 {
+    Z_Free(m_demos.menu.items);
     memset(&m_demos, 0, sizeof(m_demos));
 }
 

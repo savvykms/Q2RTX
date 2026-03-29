@@ -18,13 +18,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // cl.input.c  -- builds an intended movement command to send to the server
 
 #include "client.h"
-#include "system/lirc.h"
 
 static cvar_t    *cl_nodelta;
 static cvar_t    *cl_maxpackets;
 static cvar_t    *cl_packetdup;
 static cvar_t    *cl_fuzzhack;
-#ifdef _DEBUG
+#if USE_DEBUG
 static cvar_t    *cl_showpackets;
 #endif
 static cvar_t    *cl_instantpacket;
@@ -62,8 +61,7 @@ INPUT SUBSYSTEM
 */
 
 typedef struct {
-    qboolean    modified;
-    inputAPI_t  api;
+    bool        modified;
     int         old_dx;
     int         old_dy;
 } in_state_t;
@@ -71,42 +69,34 @@ typedef struct {
 static in_state_t   input;
 
 static cvar_t    *in_enable;
-#if USE_DINPUT
-static cvar_t    *in_direct;
-#endif
 static cvar_t    *in_grab;
 
-const inputAPI_t* IN_GetAPI()
-{
-	return &input.api;
-}
-
-static qboolean IN_GetCurrentGrab(void)
+static bool IN_GetCurrentGrab(void)
 {
     if (cls.active != ACT_ACTIVATED)
-        return qfalse;  // main window doesn't have focus
+        return false;  // main window doesn't have focus
 
     if (r_config.flags & QVF_FULLSCREEN)
-        return qtrue;   // full screen
+        return true;   // full screen
 
     if (cls.key_dest & (KEY_MENU | KEY_CONSOLE))
-        return qfalse;  // menu or console is up
+        return false;  // menu or console is up
 
     if (cls.state != ca_active && cls.state != ca_cinematic)
-        return qfalse;  // not connected
+        return false;  // not connected
 
     if (in_grab->integer >= 2) {
         if (cls.demo.playback && !Key_IsDown(K_SHIFT))
-            return qfalse;  // playing a demo (and not using freelook)
+            return false;  // playing a demo (and not using freelook)
 
         if (cl.frame.ps.pmove.pm_type == PM_FREEZE)
-            return qfalse;  // spectator mode
+            return false;  // spectator mode
     }
 
     if (in_grab->integer >= 1)
-        return qtrue;   // regular playing mode
+        return true;   // regular playing mode
 
-    return qfalse;
+    return false;
 }
 
 /*
@@ -116,8 +106,8 @@ IN_Activate
 */
 void IN_Activate(void)
 {
-    if (input.api.Grab) {
-        input.api.Grab(IN_GetCurrentGrab());
+    if (vid.grab_mouse) {
+        vid.grab_mouse(IN_GetCurrentGrab());
     }
 }
 
@@ -141,16 +131,7 @@ void IN_Frame(void)
 {
     if (input.modified) {
         IN_Restart_f();
-        return;
     }
-
-    if (input.api.GetEvents) {
-        input.api.GetEvents();
-    }
-
-#if USE_LIRC
-    Lirc_GetEvents();
-#endif
 }
 
 /*
@@ -160,8 +141,8 @@ IN_WarpMouse
 */
 void IN_WarpMouse(int x, int y)
 {
-    if (input.api.Warp) {
-        input.api.Warp(x, y);
+    if (vid.warp_mouse) {
+        vid.warp_mouse(x, y);
     }
 }
 
@@ -172,29 +153,20 @@ IN_Shutdown
 */
 void IN_Shutdown(void)
 {
-#if USE_DINPUT
-    if (in_direct) {
-        in_direct->changed = NULL;
-    }
-#endif
     if (in_grab) {
         in_grab->changed = NULL;
     }
 
-    if (input.api.Shutdown) {
-        input.api.Shutdown();
+    if (vid.shutdown_mouse) {
+        vid.shutdown_mouse();
     }
-
-#if USE_LIRC
-    Lirc_Shutdown();
-#endif
 
     memset(&input, 0, sizeof(input));
 }
 
 static void in_changed_hard(cvar_t *self)
 {
-    input.modified = qtrue;
+    input.modified = true;
 }
 
 static void in_changed_soft(cvar_t *self)
@@ -209,12 +181,6 @@ IN_Init
 */
 void IN_Init(void)
 {
-    qboolean ret = qfalse;
-
-#if USE_LIRC
-    Lirc_Init();
-#endif
-
     in_enable = Cvar_Get("in_enable", "1", 0);
     in_enable->changed = in_changed_hard;
     if (!in_enable->integer) {
@@ -222,29 +188,10 @@ void IN_Init(void)
         return;
     }
 
-#if USE_DINPUT
-    in_direct = Cvar_Get("in_direct", "1", 0);
-    if (in_direct->integer) {
-        DI_FillAPI(&input.api);
-        ret = input.api.Init();
-        if (!ret) {
-            Cvar_Set("in_direct", "0");
-        }
+    if (!vid.init_mouse()) {
+        Cvar_Set("in_enable", "0");
+        return;
     }
-#endif
-
-    if (!ret) {
-        VID_FillInputAPI(&input.api);
-        ret = input.api.Init();
-        if (!ret) {
-            Cvar_Set("in_enable", "0");
-            return;
-        }
-    }
-
-#if USE_DINPUT
-    in_direct->changed = in_changed_hard;
-#endif
 
     in_grab = Cvar_Get("in_grab", "1", 0);
     in_grab->changed = in_changed_soft;
@@ -272,7 +219,7 @@ state bit 1 is edge triggered on the up to down transition
 state bit 2 is edge triggered on the down to up transition
 
 
-Key_Event (int key, qboolean down, unsigned time);
+Key_Event (int key, bool down, unsigned time);
 
   +mlook src time
 
@@ -293,7 +240,7 @@ static kbutton_t    in_strafe, in_speed, in_use, in_attack;
 static kbutton_t    in_up, in_down;
 
 static int          in_impulse;
-static qboolean     in_mlooking;
+static bool         in_mlooking;
 
 static void KeyDown(kbutton_t *b)
 {
@@ -302,7 +249,7 @@ static void KeyDown(kbutton_t *b)
 
     c = Cmd_Argv(1);
     if (c[0])
-        k = atoi(c);
+        k = Q_atoi(c);
     else
         k = -1;        // typed manually at the console for continuous down
 
@@ -323,7 +270,7 @@ static void KeyDown(kbutton_t *b)
 
     // save timestamp
     c = Cmd_Argv(2);
-    b->downtime = atoi(c);
+    b->downtime = Q_atoi(c);
     if (!b->downtime) {
         b->downtime = com_eventTime - 100;
     }
@@ -339,7 +286,7 @@ static void KeyUp(kbutton_t *b)
 
     c = Cmd_Argv(1);
     if (c[0])
-        k = atoi(c);
+        k = Q_atoi(c);
     else {
         // typed manually at the console, assume for unsticking, so clear all
         b->down[0] = b->down[1] = 0;
@@ -361,7 +308,7 @@ static void KeyUp(kbutton_t *b)
 
     // save timestamp
     c = Cmd_Argv(2);
-    uptime = atoi(c);
+    uptime = Q_atoi(c);
     if (!uptime) {
         b->msec += 10;
     } else if (uptime > b->downtime) {
@@ -411,8 +358,8 @@ static void IN_AttackDown(void)
 {
     KeyDown(&in_attack);
 
-    if (cl_instantpacket->integer && cls.state == ca_active && cls.netchan) {
-        cl.sendPacketNow = qtrue;
+    if (cl_instantpacket->integer && cls.state == ca_active && !cls.demo.playback) {
+        cl.sendPacketNow = true;
     }
 }
 
@@ -425,8 +372,8 @@ static void IN_UseDown(void)
 {
     KeyDown(&in_use);
 
-    if (cl_instantpacket->integer && cls.state == ca_active && cls.netchan) {
-        cl.sendPacketNow = qtrue;
+    if (cl_instantpacket->integer && cls.state == ca_active && !cls.demo.playback) {
+        cl.sendPacketNow = true;
     }
 }
 
@@ -437,7 +384,7 @@ static void IN_UseUp(void)
 
 static void IN_Impulse(void)
 {
-    in_impulse = atoi(Cmd_Argv(1));
+    in_impulse = Q_atoi(Cmd_Argv(1));
 }
 
 static void IN_CenterView(void)
@@ -447,12 +394,12 @@ static void IN_CenterView(void)
 
 static void IN_MLookDown(void)
 {
-    in_mlooking = qtrue;
+    in_mlooking = true;
 }
 
 static void IN_MLookUp(void)
 {
-    in_mlooking = qfalse;
+    in_mlooking = false;
 
     if (!freelook->integer && lookspring->integer)
         IN_CenterView();
@@ -468,7 +415,6 @@ Returns the fraction of the frame that the key was down
 static float CL_KeyState(kbutton_t *key)
 {
     unsigned msec = key->msec;
-    float val;
 
     if (key->state & 1) {
         // still down
@@ -482,9 +428,7 @@ static float CL_KeyState(kbutton_t *key)
         return (float)(key->state & 1);
     }
 
-    val = (float)msec / cl.cmd.msec;
-
-    return clamp(val, 0, 1);
+    return Q_clipf((float)msec / cl.cmd.msec, 0, 1);
 }
 
 //==========================================================================
@@ -503,13 +447,13 @@ static void CL_MouseMove(void)
     float mx, my;
     float speed;
 
-    if (!input.api.GetMotion) {
+    if (!vid.get_mouse_motion) {
         return;
     }
     if (cls.key_dest & (KEY_MENU | KEY_CONSOLE)) {
         return;
     }
-    if (!input.api.GetMotion(&dx, &dy)) {
+    if (!vid.get_mouse_motion(&dx, &dy)) {
         return;
     }
 
@@ -530,7 +474,7 @@ static void CL_MouseMove(void)
 
     Cvar_ClampValue(m_accel, 0, 1);
 
-    speed = sqrt(mx * mx + my * my);
+    speed = sqrtf(mx * mx + my * my);
     speed = sensitivity->value + speed * m_accel->value;
 
     mx *= speed;
@@ -618,30 +562,27 @@ static void CL_BaseMove(vec3_t move)
 
 static void CL_ClampSpeed(vec3_t move)
 {
-    float speed = cl.pmp.maxspeed;
+    const float speed = 400;    // default (maximum) running speed
 
-    clamp(move[0], -speed, speed);
-    clamp(move[1], -speed, speed);
-    clamp(move[2], -speed, speed);
+    move[0] = Q_clipf(move[0], -speed, speed);
+    move[1] = Q_clipf(move[1], -speed, speed);
+    move[2] = Q_clipf(move[2], -speed, speed);
 }
 
 static void CL_ClampPitch(void)
 {
-    float pitch;
+    float pitch, angle;
 
     pitch = SHORT2ANGLE(cl.frame.ps.pmove.delta_angles[PITCH]);
-    if (pitch > 180)
-        pitch -= 360;
+    angle = cl.viewangles[PITCH] + pitch;
 
-    if (cl.viewangles[PITCH] + pitch < -360)
-        cl.viewangles[PITCH] += 360; // wrapped
-    if (cl.viewangles[PITCH] + pitch > 360)
-        cl.viewangles[PITCH] -= 360; // wrapped
+    if (angle < -180)
+        angle += 360; // wrapped
+    if (angle > 180)
+        angle -= 360; // wrapped
 
-    if (cl.viewangles[PITCH] + pitch > 89)
-        cl.viewangles[PITCH] = 89 - pitch;
-    if (cl.viewangles[PITCH] + pitch < -89)
-        cl.viewangles[PITCH] = -89 - pitch;
+    angle = Q_clipf(angle, -89, 89);
+    cl.viewangles[PITCH] = angle - pitch;
 }
 
 /*
@@ -699,6 +640,45 @@ static void m_autosens_changed(cvar_t *self)
     autosens_y = 1.0f / V_CalcFov(fov, 4, 3);
 }
 
+static const cmdreg_t c_input[] = {
+    { "centerview", IN_CenterView },
+    { "+moveup", IN_UpDown },
+    { "-moveup", IN_UpUp },
+    { "+movedown", IN_DownDown },
+    { "-movedown", IN_DownUp },
+    { "+left", IN_LeftDown },
+    { "-left", IN_LeftUp },
+    { "+right", IN_RightDown },
+    { "-right", IN_RightUp },
+    { "+forward", IN_ForwardDown },
+    { "-forward", IN_ForwardUp },
+    { "+back", IN_BackDown },
+    { "-back", IN_BackUp },
+    { "+lookup", IN_LookupDown },
+    { "-lookup", IN_LookupUp },
+    { "+lookdown", IN_LookdownDown },
+    { "-lookdown", IN_LookdownUp },
+    { "+strafe", IN_StrafeDown },
+    { "-strafe", IN_StrafeUp },
+    { "+moveleft", IN_MoveleftDown },
+    { "-moveleft", IN_MoveleftUp },
+    { "+moveright", IN_MoverightDown },
+    { "-moveright", IN_MoverightUp },
+    { "+speed", IN_SpeedDown },
+    { "-speed", IN_SpeedUp },
+    { "+attack", IN_AttackDown },
+    { "-attack", IN_AttackUp },
+    { "+use", IN_UseDown },
+    { "-use", IN_UseUp },
+    { "impulse", IN_Impulse },
+    { "+klook", IN_KLookDown },
+    { "-klook", IN_KLookUp },
+    { "+mlook", IN_MLookDown },
+    { "-mlook", IN_MLookUp },
+    { "in_restart", IN_Restart_f },
+    { NULL }
+};
+
 /*
 ============
 CL_RegisterInput
@@ -706,49 +686,13 @@ CL_RegisterInput
 */
 void CL_RegisterInput(void)
 {
-    Cmd_AddCommand("centerview", IN_CenterView);
-
-    Cmd_AddCommand("+moveup", IN_UpDown);
-    Cmd_AddCommand("-moveup", IN_UpUp);
-    Cmd_AddCommand("+movedown", IN_DownDown);
-    Cmd_AddCommand("-movedown", IN_DownUp);
-    Cmd_AddCommand("+left", IN_LeftDown);
-    Cmd_AddCommand("-left", IN_LeftUp);
-    Cmd_AddCommand("+right", IN_RightDown);
-    Cmd_AddCommand("-right", IN_RightUp);
-    Cmd_AddCommand("+forward", IN_ForwardDown);
-    Cmd_AddCommand("-forward", IN_ForwardUp);
-    Cmd_AddCommand("+back", IN_BackDown);
-    Cmd_AddCommand("-back", IN_BackUp);
-    Cmd_AddCommand("+lookup", IN_LookupDown);
-    Cmd_AddCommand("-lookup", IN_LookupUp);
-    Cmd_AddCommand("+lookdown", IN_LookdownDown);
-    Cmd_AddCommand("-lookdown", IN_LookdownUp);
-    Cmd_AddCommand("+strafe", IN_StrafeDown);
-    Cmd_AddCommand("-strafe", IN_StrafeUp);
-    Cmd_AddCommand("+moveleft", IN_MoveleftDown);
-    Cmd_AddCommand("-moveleft", IN_MoveleftUp);
-    Cmd_AddCommand("+moveright", IN_MoverightDown);
-    Cmd_AddCommand("-moveright", IN_MoverightUp);
-    Cmd_AddCommand("+speed", IN_SpeedDown);
-    Cmd_AddCommand("-speed", IN_SpeedUp);
-    Cmd_AddCommand("+attack", IN_AttackDown);
-    Cmd_AddCommand("-attack", IN_AttackUp);
-    Cmd_AddCommand("+use", IN_UseDown);
-    Cmd_AddCommand("-use", IN_UseUp);
-    Cmd_AddCommand("impulse", IN_Impulse);
-    Cmd_AddCommand("+klook", IN_KLookDown);
-    Cmd_AddCommand("-klook", IN_KLookUp);
-    Cmd_AddCommand("+mlook", IN_MLookDown);
-    Cmd_AddCommand("-mlook", IN_MLookUp);
-
-    Cmd_AddCommand("in_restart", IN_Restart_f);
+    Cmd_Register(c_input);
 
     cl_nodelta = Cvar_Get("cl_nodelta", "0", 0);
     cl_maxpackets = Cvar_Get("cl_maxpackets", "30", 0);
     cl_fuzzhack = Cvar_Get("cl_fuzzhack", "0", 0);
     cl_packetdup = Cvar_Get("cl_packetdup", "1", 0);
-#ifdef _DEBUG
+#if USE_DEBUG
     cl_showpackets = Cvar_Get("cl_showpackets", "0", 0);
 #endif
     cl_instantpacket = Cvar_Get("cl_instantpacket", "1", 0);
@@ -792,19 +736,15 @@ void CL_FinalizeCmd(void)
     vec3_t move;
 
     // command buffer ticks in sync with cl_maxfps
-    if (cmd_buffer.waitCount > 0) {
-        cmd_buffer.waitCount--;
-    }
-    if (cl_cmdbuf.waitCount > 0) {
-        cl_cmdbuf.waitCount--;
-    }
+    Cbuf_Frame(&cmd_buffer);
+    Cbuf_Frame(&cl_cmdbuf);
 
     if (cls.state != ca_active) {
-        return; // not talking to a server
+        goto clear; // not talking to a server
     }
 
     if (sv_paused->integer) {
-        return;
+        goto clear;
     }
 
 //
@@ -814,9 +754,6 @@ void CL_FinalizeCmd(void)
         cl.cmd.buttons |= BUTTON_ATTACK;
     if (in_use.state & 3)
         cl.cmd.buttons |= BUTTON_USE;
-
-    in_attack.state &= ~2;
-    in_use.state &= ~2;
 
     if (cls.key_dest == KEY_GAME && Key_AnyKeyDown()) {
         cl.cmd.buttons |= BUTTON_ANY;
@@ -844,9 +781,22 @@ void CL_FinalizeCmd(void)
     cl.cmd.sidemove = move[1];
     cl.cmd.upmove = move[2];
 
+    cl.cmd.impulse = in_impulse;
+
+    // save this command off for prediction
+    cl.cmdNumber++;
+    cl.cmds[cl.cmdNumber & CMD_MASK] = cl.cmd;
+
+clear:
+    // clear pending cmd
+    memset(&cl.cmd, 0, sizeof(cl.cmd));
+
     // clear all states
     cl.mousemove[0] = 0;
     cl.mousemove[1] = 0;
+
+    in_attack.state &= ~2;
+    in_use.state &= ~2;
 
     KeyClear(&in_right);
     KeyClear(&in_left);
@@ -863,29 +813,21 @@ void CL_FinalizeCmd(void)
     KeyClear(&in_lookup);
     KeyClear(&in_lookdown);
 
-    cl.cmd.impulse = in_impulse;
     in_impulse = 0;
-
-    // save this command off for prediction
-    cl.cmdNumber++;
-    cl.cmds[cl.cmdNumber & CMD_MASK] = cl.cmd;
-
-    // clear pending cmd
-    memset(&cl.cmd, 0, sizeof(cl.cmd));
 }
 
-static inline qboolean ready_to_send(void)
+static inline bool ready_to_send(void)
 {
     unsigned msec;
 
     if (cl.sendPacketNow) {
-        return qtrue;
+        return true;
     }
-    if (cls.netchan->message.cursize || cls.netchan->reliable_ack_pending) {
-        return qtrue;
+    if (cls.netchan.message.cursize || cls.netchan.reliable_ack_pending) {
+        return true;
     }
     if (!cl_maxpackets->integer) {
-        return qtrue;
+        return true;
     }
 
     if (cl_maxpackets->integer < 10) {
@@ -897,20 +839,20 @@ static inline qboolean ready_to_send(void)
         msec = 100 / (100 / msec);
     }
     if (cls.realtime - cl.lastTransmitTime < msec) {
-        return qfalse;
+        return false;
     }
 
-    return qtrue;
+    return true;
 }
 
-static inline qboolean ready_to_send_hacked(void)
+static inline bool ready_to_send_hacked(void)
 {
     if (!cl_fuzzhack->integer) {
-        return qtrue; // packet drop hack disabled
+        return true; // packet drop hack disabled
     }
 
     if (cl.cmdNumber - cl.lastTransmitCmdNumberReal > 2) {
-        return qtrue; // can't drop more than 2 cmds
+        return true; // can't drop more than 2 cmds
     }
 
     return ready_to_send();
@@ -926,9 +868,10 @@ static void CL_SendDefaultCmd(void)
     size_t cursize q_unused, checksumIndex;
     usercmd_t *cmd, *oldcmd;
     client_history_t *history;
+    int version;
 
     // archive this packet
-    history = &cl.history[cls.netchan->outgoing_sequence & CMD_MASK];
+    history = &cl.history[cls.netchan.outgoing_sequence & CMD_MASK];
     history->cmdNumber = cl.cmdNumber;
     history->sent = cls.realtime;    // for ping calculation
     history->rcvd = 0;
@@ -937,7 +880,7 @@ static void CL_SendDefaultCmd(void)
 
     // see if we are ready to send this packet
     if (!ready_to_send_hacked()) {
-        cls.netchan->outgoing_sequence++; // just drop the packet
+        cls.netchan.outgoing_sequence++; // just drop the packet
         return;
     }
 
@@ -949,9 +892,12 @@ static void CL_SendDefaultCmd(void)
 
     // save the position for a checksum byte
     checksumIndex = 0;
+    version = 0;
     if (cls.serverProtocol <= PROTOCOL_VERSION_DEFAULT) {
         checksumIndex = msg_write.cursize;
         SZ_GetSpace(&msg_write, 1);
+    } else if (cls.serverProtocol == PROTOCOL_VERSION_R1Q2) {
+        version = cls.protocolVersion;
     }
 
     // let the server know what the last frame we
@@ -965,25 +911,25 @@ static void CL_SendDefaultCmd(void)
     // send this and the previous cmds in the message, so
     // if the last packet was dropped, it can be recovered
     cmd = &cl.cmds[(cl.cmdNumber - 2) & CMD_MASK];
-    MSG_WriteDeltaUsercmd(NULL, cmd, cls.protocolVersion);
+    MSG_WriteDeltaUsercmd(NULL, cmd, version);
     MSG_WriteByte(cl.lightlevel);
     oldcmd = cmd;
 
     cmd = &cl.cmds[(cl.cmdNumber - 1) & CMD_MASK];
-    MSG_WriteDeltaUsercmd(oldcmd, cmd, cls.protocolVersion);
+    MSG_WriteDeltaUsercmd(oldcmd, cmd, version);
     MSG_WriteByte(cl.lightlevel);
     oldcmd = cmd;
 
     cmd = &cl.cmds[cl.cmdNumber & CMD_MASK];
-    MSG_WriteDeltaUsercmd(oldcmd, cmd, cls.protocolVersion);
+    MSG_WriteDeltaUsercmd(oldcmd, cmd, version);
     MSG_WriteByte(cl.lightlevel);
 
     if (cls.serverProtocol <= PROTOCOL_VERSION_DEFAULT) {
         // calculate a checksum over the move commands
         msg_write.data[checksumIndex] = COM_BlockSequenceCRCByte(
-                                            msg_write.data + checksumIndex + 1,
-                                            msg_write.cursize - checksumIndex - 1,
-                                            cls.netchan->outgoing_sequence);
+            msg_write.data + checksumIndex + 1,
+            msg_write.cursize - checksumIndex - 1,
+            cls.netchan.outgoing_sequence);
     }
 
     P_FRAMES++;
@@ -991,10 +937,10 @@ static void CL_SendDefaultCmd(void)
     //
     // deliver the message
     //
-    cursize = cls.netchan->Transmit(cls.netchan, msg_write.cursize, msg_write.data, 1);
-#ifdef _DEBUG
+    cursize = cls.netchan.Transmit(&cls.netchan, msg_write.cursize, msg_write.data, 1);
+#if USE_DEBUG
     if (cl_showpackets->integer) {
-        Com_Printf("%"PRIz" ", cursize);
+        Com_Printf("%zu ", cursize);
     }
 #endif
 
@@ -1022,7 +968,7 @@ static void CL_SendBatchedCmd(void)
     }
 
     // archive this packet
-    seq = cls.netchan->outgoing_sequence;
+    seq = cls.netchan.outgoing_sequence;
     history = &cl.history[seq & CMD_MASK];
     history->cmdNumber = cl.cmdNumber;
     history->sent = cls.realtime;    // for ping calculation
@@ -1031,6 +977,8 @@ static void CL_SendBatchedCmd(void)
     cl.lastTransmitTime = cls.realtime;
     cl.lastTransmitCmdNumber = cl.cmdNumber;
     cl.lastTransmitCmdNumberReal = cl.cmdNumber;
+
+    MSG_BeginWriting();
 
     // begin a client move command
     patch = SZ_GetSpace(&msg_write, 1);
@@ -1072,8 +1020,8 @@ static void CL_SendBatchedCmd(void)
         for (j = oldest->cmdNumber + 1; j <= history->cmdNumber; j++) {
             cmd = &cl.cmds[j & CMD_MASK];
             totalMsec += cmd->msec;
-            bits = MSG_WriteDeltaUsercmd_Enhanced(oldcmd, cmd, cls.protocolVersion);
-#ifdef _DEBUG
+            bits = MSG_WriteDeltaUsercmd_Enhanced(oldcmd, cmd);
+#if USE_DEBUG
             if (cl_showpackets->integer == 3) {
                 MSG_ShowDeltaUsercmdBits_Enhanced(bits);
             }
@@ -1082,17 +1030,19 @@ static void CL_SendBatchedCmd(void)
         }
     }
 
+    MSG_FlushBits();
+
     P_FRAMES++;
 
     //
     // deliver the message
     //
-    cursize = cls.netchan->Transmit(cls.netchan, msg_write.cursize, msg_write.data, 1);
-#ifdef _DEBUG
+    cursize = cls.netchan.Transmit(&cls.netchan, msg_write.cursize, msg_write.data, 1);
+#if USE_DEBUG
     if (cl_showpackets->integer == 1) {
-        Com_Printf("%"PRIz"(%i) ", cursize, totalCmds);
+        Com_Printf("%zu(%i) ", cursize, totalCmds);
     } else if (cl_showpackets->integer == 2) {
-        Com_Printf("%"PRIz"(%i) ", cursize, totalMsec);
+        Com_Printf("%zu(%i) ", cursize, totalMsec);
     } else if (cl_showpackets->integer == 3) {
         Com_Printf(" | ");
     }
@@ -1107,7 +1057,7 @@ static void CL_SendKeepAlive(void)
     size_t cursize q_unused;
 
     // archive this packet
-    history = &cl.history[cls.netchan->outgoing_sequence & CMD_MASK];
+    history = &cl.history[cls.netchan.outgoing_sequence & CMD_MASK];
     history->cmdNumber = cl.cmdNumber;
     history->sent = cls.realtime;    // for ping calculation
     history->rcvd = 0;
@@ -1116,10 +1066,10 @@ static void CL_SendKeepAlive(void)
     cl.lastTransmitCmdNumber = cl.cmdNumber;
     cl.lastTransmitCmdNumberReal = cl.cmdNumber;
 
-    cursize = cls.netchan->Transmit(cls.netchan, 0, NULL, 1);
-#ifdef _DEBUG
+    cursize = cls.netchan.Transmit(&cls.netchan, 0, "", 1);
+#if USE_DEBUG
     if (cl_showpackets->integer) {
-        Com_Printf("%"PRIz" ", cursize);
+        Com_Printf("%zu ", cursize);
     }
 #endif
 }
@@ -1130,16 +1080,12 @@ static void CL_SendUserinfo(void)
     cvar_t *var;
     int i;
 
-    if (!cls.userinfo_modified) {
-        return;
-    }
-
     if (cls.userinfo_modified == MAX_PACKET_USERINFOS) {
         size_t len = Cvar_BitInfo(userinfo, CVAR_USERINFO);
         Com_DDPrintf("%s: %u: full update\n", __func__, com_framenum);
         MSG_WriteByte(clc_userinfo);
         MSG_WriteData(userinfo, len + 1);
-        MSG_FlushTo(&cls.netchan->message);
+        MSG_FlushTo(&cls.netchan.message);
     } else if (cls.serverProtocol == PROTOCOL_VERSION_Q2PRO) {
         Com_DDPrintf("%s: %u: %d updates\n", __func__, com_framenum,
                      cls.userinfo_modified);
@@ -1154,13 +1100,24 @@ static void CL_SendUserinfo(void)
                 MSG_WriteString(NULL);
             }
         }
-        MSG_FlushTo(&cls.netchan->message);
+        MSG_FlushTo(&cls.netchan.message);
     } else {
         Com_WPrintf("%s: update count is %d, should never happen.\n",
                     __func__, cls.userinfo_modified);
     }
+}
 
-    cls.userinfo_modified = 0;
+static void CL_SendReliable(void)
+{
+    if (cls.userinfo_modified) {
+        CL_SendUserinfo();
+        cls.userinfo_modified = 0;
+    }
+
+    if (cls.netchan.message.overflowed) {
+        SZ_Clear(&cls.netchan.message);
+        Com_Error(ERR_DROP, "Reliable message overflowed");
+    }
 }
 
 void CL_SendCmd(void)
@@ -1169,22 +1126,21 @@ void CL_SendCmd(void)
         return; // not talking to a server
     }
 
-    // generate usercmds while playing a demo,
-    // but do not send them
-    if (!cls.netchan) {
+    // generate usercmds while playing a demo, but do not send them
+    if (cls.demo.playback) {
         return;
     }
 
     if (cls.state != ca_active || sv_paused->integer) {
         // send a userinfo update if needed
-        CL_SendUserinfo();
+        CL_SendReliable();
 
         // just keepalive or update reliable
-        if (cls.netchan->ShouldUpdate(cls.netchan)) {
+        if (cls.netchan.ShouldUpdate(&cls.netchan)) {
             CL_SendKeepAlive();
         }
 
-        cl.sendPacketNow = qfalse;
+        cl.sendPacketNow = false;
         return;
     }
 
@@ -1194,7 +1150,7 @@ void CL_SendCmd(void)
     }
 
     // send a userinfo update if needed
-    CL_SendUserinfo();
+    CL_SendReliable();
 
     if (cls.serverProtocol == PROTOCOL_VERSION_Q2PRO && cl_batchcmds->integer) {
         CL_SendBatchedCmd();
@@ -1202,6 +1158,6 @@ void CL_SendCmd(void)
         CL_SendDefaultCmd();
     }
 
-    cl.sendPacketNow = qfalse;
+    cl.sendPacketNow = false;
 }
 

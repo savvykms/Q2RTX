@@ -20,6 +20,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef _GLSL_UTILS_GLSL
 #define _GLSL_UTILS_GLSL
 
+#include "constants.h"
+
 #ifndef M_PI
 #define M_PI 3.1415926535897932384626433832795
 #endif
@@ -222,6 +224,20 @@ vec4 alpha_blend_premultiplied(vec4 top, vec4 bottom)
     return vec4(top.rgb + bottom.rgb * (1 - top.a), 1 - (1 - top.a) * (1 - bottom.a)); 
 }
 
+/* Adjust saturation by changing amplifying or muting difference to gray value.
+ * Preserves luminance. */
+vec3 apply_saturation_scale(in vec3 color, in float saturation_scale)
+{
+    float lum = luminance(color);
+    vec3 base_gray = vec3(lum);
+    vec3 d = color - base_gray;
+    return max(base_gray + d * saturation_scale, vec3(0));
+}
+
+/* Construct an orthonormal basis from normal
+ * As described in https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
+ * (Frisvad, J. R. (2012). Building an Orthonormal Basis from a 3D Unit Vector Without Normalization. Journal of
+ * Graphics Tools, 16(3), 151–159. https://doi.org/10.1080/2165347X.2012.689606) */
 mat3
 construct_ONB_frisvad(vec3 normal)
 {
@@ -467,6 +483,38 @@ uint get_primary_direction(vec3 dir)
     if(adir.y > adir.z)
         return (dir.y < 0) ? 3 : 2;
     return (dir.z < 0) ? 5 : 4;
+}
+
+vec2
+lava_uv_warp(vec2 uv, float time)
+{
+    // Lava UV warp that (hopefully) matches the warp in the original Quake 2.
+    // Relevant bits of the original rasterizer:
+
+    // #define AMP     8*0x10000
+    // #define SPEED   20
+    // #define CYCLE   128
+    // sintable[i] = AMP + sin(i * M_PI * 2 / CYCLE) * AMP; 
+    // #define TURB_SIZE               64  // base turbulent texture size
+    // #define TURB_MASK               (TURB_SIZE - 1)
+    // turb_s = ((s + turb[(t >> 16) & (CYCLE - 1)]) >> 16) & TURB_MASK;
+    // turb_t = ((t + turb[(s >> 16) & (CYCLE - 1)]) >> 16) & TURB_MASK;
+    
+    return uv.xy + sin(fract(uv.yx * 0.5 + time * 20 / 128) * 2 * M_PI) * 0.125;
+}
+
+// applies FLOWING and WARP modifiers to texture coordinates
+void perturb_tex_coord(uint material_id, float time, inout vec2 tex_coord)
+{
+    if((material_id & MATERIAL_FLAG_FLOWING) != 0)
+    {
+        tex_coord.x -= time * 0.5;
+    }
+
+    if((material_id & MATERIAL_FLAG_WARP) != 0)
+    {
+        tex_coord = lava_uv_warp(tex_coord, time);
+    }
 }
 
 

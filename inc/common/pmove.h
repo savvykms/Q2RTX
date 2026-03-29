@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef PMOVE_H
-#define PMOVE_H
+#pragma once
 
 /*
 ==============================================================
@@ -30,11 +29,11 @@ Common between server and client so prediction matches
 */
 
 typedef struct {
-    qboolean    qwmode;
-    qboolean    airaccelerate;
-    qboolean    strafehack;
-    qboolean    flyhack;
-    qboolean    waterhack;
+    bool        qwmode;
+    bool        airaccelerate;
+    bool        strafehack;
+    bool        flyhack;
+    bool        waterhack;
     float       speedmult;
     float       watermult;
     float       maxspeed;
@@ -47,5 +46,3 @@ void Pmove(pmove_t *pmove, pmoveParams_t *params);
 
 void PmoveInit(pmoveParams_t *pmp);
 void PmoveEnableQW(pmoveParams_t *pmp);
-
-#endif // PMOVE_H

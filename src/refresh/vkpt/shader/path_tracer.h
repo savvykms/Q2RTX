@@ -92,9 +92,9 @@ Quake 2 geometry includes these skyboxes that are often placed right where
 we would need a portal light. But in many cases, they are also big and complex
 meshes that enclose large outdoor areas, and we don't want to create analytic
 light from those. So specific places in the game where portal lights make sense
-are marked in the "sky_clusters.txt" file in the game directory. Same conversion
-is applied for lava geometry in many places in the game, and is guided by 
-the same file.
+are marked in a sky clusters file (maps/sky/<mapname>.txt) in the game directory.
+Same conversion is applied for lava geometry in many places in the game, and is
+guided by the same file.
 
 Converting skyboxes to local lights provides two benefits:
 
@@ -117,62 +117,62 @@ Converting skyboxes to local lights provides two benefits:
 // ========================================================================== //
 */
 
-#ifdef NV_RAY_TRACING
+#ifndef PATH_TRACER_H_
+#define PATH_TRACER_H_
 
-#extension GL_NV_ray_tracing : require
-#define rt_accelerationStructure accelerationStructureNV
-#define rt_hitAttribute hitAttributeNV
-#define rt_HitT gl_HitTNV
-#define rt_ignoreIntersection ignoreIntersectionNV()
-#define rt_InstanceCustomIndex gl_InstanceCustomIndexNV
-#define rt_LaunchID gl_LaunchIDNV
-#define rt_rayPayload rayPayloadNV
-#define rt_rayPayloadIn rayPayloadInNV
-#define rt_traceRay traceNV
-#define rt_WorldRayDirection gl_WorldRayDirectionNV
-
+#ifdef KHR_RAY_QUERY
+#extension GL_EXT_ray_query : enable
+#define rt_LaunchID gl_GlobalInvocationID
 #else
-
-#extension GL_EXT_ray_tracing : require
-#define rt_accelerationStructure accelerationStructureEXT
-#define rt_hitAttribute hitAttributeEXT
-#define rt_HitT gl_HitTEXT
-#define rt_ignoreIntersection ignoreIntersectionEXT
-#define rt_InstanceCustomIndex gl_InstanceCustomIndexEXT
 #define rt_LaunchID gl_LaunchIDEXT
-#define rt_rayPayload rayPayloadEXT
-#define rt_rayPayloadIn rayPayloadInEXT
-#define rt_traceRay traceRayEXT
-#define rt_WorldRayDirection gl_WorldRayDirectionEXT
-
 #endif
 
+#extension GL_EXT_ray_tracing             : require
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_EXT_nonuniform_qualifier    : enable
 
+#define gl_RayFlagsSkipProceduralPrimitives 0x200 // not defined in GLSL
+
 #define INSTANCE_DYNAMIC_FLAG        (1u << 31)
-#define INSTANCE_SKY_FLAG            (1u << 30)
-#define PRIM_ID_MASK (~(INSTANCE_DYNAMIC_FLAG | INSTANCE_SKY_FLAG))
+#define PRIM_ID_MASK (~INSTANCE_DYNAMIC_FLAG)
 
 #define GLOBAL_UBO_DESC_SET_IDX 1
 #include "global_ubo.h"
 
 
 layout (push_constant) uniform push_constant_block {
-	int gpu_index;
-    int bounce_index;
+   int gpu_index;
+   int bounce_index;
 } push_constants;
 
-struct RayPayload {
-	vec2 barycentric;
-	uint instance_prim;
-	float hit_distance;
-	uvec2 transparency; // half4x16
-	float max_transparent_distance;
+struct RayPayloadGeometry {
+   vec2 barycentric;
+   /* two packed 16 bit integers, buffer index in low 16 bits and
+    * instance index in high 16 bits */
+   int buffer_and_instance_idx;
+   uint primitive_id;
+   float hit_distance;
 };
 
-struct RayPayloadShadow {
-	int missed;
+struct RayPayloadEffects {
+   uvec2 transparency; // half4x16
+   uint distances; // half2x16 - min and max
+   uvec4 fog1; // half8x16: .xy = color.rgba; .z = t_min, t_max; .w = density: a and b for (a*t + b)
+   uvec4 fog2; // same as fog1 but for a fog volume further away
+#ifndef KHR_RAY_QUERY
+   // Store TMax in the payload because gl_RayTmaxEXT changes while the ray is being traced.
+   // See the GLSL_EXT_ray_tracing spec near "description for gl_RayTminEXT and gl_RayTmaxEXT"
+   // https://github.com/KhronosGroup/GLSL/blob/master/extensions/ext/GLSL_EXT_ray_tracing.txt 
+   float rayTmax; 
+#endif
 };
+
+struct HitAttributeBeam {
+	/* packed half2x16, with fade value in x component/low 16 bits and
+	 * thickness in y component/high 16 bits */
+	uint fade_and_thickness;
+};
+
+#endif // PATH_TRACER_H_
 
 // vim: shiftwidth=4 noexpandtab tabstop=4 cindent

@@ -16,6 +16,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#pragma once
+
 #include "../server.h"
 #include <setjmp.h>
 
@@ -30,7 +32,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
     LIST_FOR_EACH(mvd_client_t, cl, &(mvd)->clients, entry)
 
 #define EDICT_MVDCL(ent)  ((mvd_client_t *)((ent)->client))
-#define CS_NUM(c, n)      ((char *)(c) + (n) * MAX_QPATH)
 
 #define MVD_InfoSet(var, val) \
     Cvar_FullSet(var, val, CVAR_SERVERINFO | CVAR_GAME, FROM_CODE)
@@ -61,7 +62,7 @@ typedef struct mvd_cs_s {
 
 typedef struct {
     player_state_t ps;
-    qboolean inuse;
+    bool inuse;
     char name[16];
     mvd_cs_t *configstrings;
 } mvd_player_t;
@@ -76,8 +77,8 @@ typedef struct {
     list_t          entry;
     struct mvd_s    *mvd;
     client_t        *cl;
-    qboolean        admin;
-    qboolean        notified;
+    bool            admin;
+    bool            notified;
     unsigned        begin_time;
     float           fov;
     int             uf;
@@ -85,8 +86,8 @@ typedef struct {
     mvd_player_t    *target;
     mvd_player_t    *oldtarget;
     int             chase_mask;
-    qboolean        chase_auto;
-    qboolean        chase_wait;
+    bool            chase_auto;
+    bool            chase_wait;
     byte            chase_bitmap[MAX_CLIENTS / CHAR_BIT];
 
     mvd_layout_t    layout_type;
@@ -113,9 +114,8 @@ typedef enum {
 } mvd_state_t;
 
 typedef struct {
-    list_t entry;
     int framenum;
-    off_t filepos;
+    int64_t filepos;
     size_t msglen;
     byte data[1];
 } mvd_snap_t;
@@ -131,15 +131,16 @@ typedef struct mvd_s {
     int             id;
     char            name[MAX_MVD_NAME];
     struct gtv_s    *gtv;
-    qboolean        (*read_frame)(struct mvd_s *);
-    qboolean        (*forward_cmd)(mvd_client_t *);
+    bool            (*read_frame)(struct mvd_s *);
+    bool            (*forward_cmd)(mvd_client_t *);
 
     // demo related variables
     qhandle_t   demorecording;
     char        *demoname;
-    qboolean    demoseeking;
+    bool        demoseeking;
     int         last_snapshot;
-    list_t      snapshots;
+    mvd_snap_t  **snapshots;
+    int         numsnapshots;
 
     // delay buffer
     fifo_t      delay;
@@ -149,18 +150,22 @@ typedef struct mvd_s {
     int         framenum;
 
     // game state
-    char    gamedir[MAX_QPATH];
-    char    mapname[MAX_QPATH];
-    int     servercount;
-    int     maxclients;
-    edict_pool_t pool;
-    cm_t    cm;
-    vec3_t  spawnOrigin;
-    vec3_t  spawnAngles;
-    int     pm_type;
+    char            gamedir[MAX_QPATH];
+    char            mapname[MAX_QPATH];
+    int             version;
+    int             servercount;
+    int             maxclients;
+    game_export_t   ge;
+    cm_t            cm;
+    vec3_t          spawnOrigin;
+    vec3_t          spawnAngles;
+    int             pm_type;
     byte            dcs[CS_BITMAP_BYTES];
-    char            baseconfigstrings[MAX_CONFIGSTRINGS][MAX_QPATH];
-    char            configstrings[MAX_CONFIGSTRINGS][MAX_QPATH];
+    configstring_t  baseconfigstrings[MAX_CONFIGSTRINGS];
+    configstring_t  configstrings[MAX_CONFIGSTRINGS];
+    const cs_remap_t *csr;
+    msgEsFlags_t    esFlags;
+    msgPsFlags_t    psFlags;
     edict_t         edicts[MAX_EDICTS];
     mvd_player_t    *players; // [maxclients]
     mvd_player_t    *dummy; // &players[clientNum]
@@ -169,8 +174,8 @@ typedef struct mvd_s {
     mvd_flags_t     flags;
     char        layout[MAX_NET_STRING];
     char        oldscores[MAX_NET_STRING]; // layout is copied here
-    qboolean    intermission;
-    qboolean    dirty;
+    bool        intermission;
+    bool        dirty;
 
     // UDP client list
     list_t      clients;
@@ -181,16 +186,16 @@ typedef struct mvd_s {
 // mvd_client.c
 //
 
-extern list_t           mvd_channel_list;
-extern mvd_t            mvd_waitingRoom;
-extern qboolean         mvd_dirty;
+extern list_t       mvd_channel_list;
+extern mvd_t        mvd_waitingRoom;
+extern bool         mvd_dirty;
 
-extern qboolean     mvd_active;
+extern bool         mvd_active;
 extern unsigned     mvd_last_activity;
 
 extern jmp_buf  mvd_jmpbuf;
 
-#ifdef _DEBUG
+#if USE_DEBUG
 extern cvar_t    *mvd_shownet;
 #endif
 
@@ -215,9 +220,9 @@ int MVD_Frame(void);
 // mvd_parse.c
 //
 
-qboolean MVD_ParseMessage(mvd_t *mvd);
+bool MVD_ParseMessage(mvd_t *mvd);
 void MVD_ParseEntityString(mvd_t *mvd, const char *data);
-void MVD_ClearState(mvd_t *mvd, qboolean full);
+void MVD_ClearState(mvd_t *mvd, bool full);
 
 //
 // mvd_game.c
@@ -235,6 +240,7 @@ void MVD_GameClientDrop(edict_t *ent, const char *prefix, const char *reason);
 void MVD_UpdateClients(mvd_t *mvd);
 void MVD_FreePlayer(mvd_player_t *player);
 void MVD_UpdateConfigstring(mvd_t *mvd, int index);
+void MVD_WriteStringList(mvd_client_t *client, mvd_cs_t *cs);
 void MVD_SetPlayerNames(mvd_t *mvd);
 void MVD_LinkEdict(mvd_t *mvd, edict_t *ent);
 

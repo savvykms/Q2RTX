@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef UI_H
-#define UI_H
+#pragma once
 
 #include "common/net/net.h"
 #include "client/client.h"
@@ -33,15 +32,15 @@ typedef enum {
 void        UI_Init(void);
 void        UI_Shutdown(void);
 void        UI_ModeChanged(void);
-void        UI_KeyEvent(int key, qboolean down);
+void        UI_KeyEvent(int key, bool down);
 void        UI_CharEvent(int key);
-void        UI_Draw(int realtime);
+void        UI_Draw(unsigned realtime);
 void        UI_OpenMenu(uiMenu_t menu);
 void        UI_Frame(int msec);
 void        UI_StatusEvent(const serverStatus_t *status);
 void        UI_ErrorEvent(netadr_t *from);
 void        UI_MouseEvent(int x, int y);
-qboolean    UI_IsTransparent(void);
+bool        UI_IsTransparent(void);
 #else
 #define     UI_Init()               (void)0
 #define     UI_Shutdown()           (void)0
@@ -54,7 +53,5 @@ qboolean    UI_IsTransparent(void);
 #define     UI_StatusEvent(status)  (void)0
 #define     UI_ErrorEvent(from)     (void)0
 #define     UI_MouseEvent(x, y)     (void)0
-#define     UI_IsTransparent()      qtrue
+#define     UI_IsTransparent()      true
 #endif
-
-#endif // UI_H

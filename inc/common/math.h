@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef MATH_H
-#define MATH_H
+#pragma once
 
 #define NUMVERTEXNORMALS    162
 
@@ -37,9 +36,9 @@ void SetPlaneSignbits(cplane_t *plane);
 #define BOX_BEHIND      2
 #define BOX_INTERSECTS  3
 
-int BoxOnPlaneSide(vec3_t emins, vec3_t emaxs, cplane_t *p);
+int BoxOnPlaneSide(const vec3_t emins, const vec3_t emaxs, const cplane_t *p);
 
-static inline int BoxOnPlaneSideFast(vec3_t emins, vec3_t emaxs, cplane_t *p)
+static inline int BoxOnPlaneSideFast(const vec3_t emins, const vec3_t emaxs, const cplane_t *p)
 {
     // fast axial cases
     if (p->type < 3) {
@@ -54,7 +53,7 @@ static inline int BoxOnPlaneSideFast(vec3_t emins, vec3_t emaxs, cplane_t *p)
     return BoxOnPlaneSide(emins, emaxs, p);
 }
 
-static inline vec_t PlaneDiffFast(vec3_t v, cplane_t *p)
+static inline vec_t PlaneDiffFast(const vec3_t v, const cplane_t *p)
 {
     // fast axial cases
     if (p->type < 3) {
@@ -66,8 +65,3 @@ static inline vec_t PlaneDiffFast(vec3_t v, cplane_t *p)
 }
 
 void SetupRotationMatrix(vec3_t matrix[3], const vec3_t dir, float degrees);
-void RotatePointAroundVector(vec3_t dst, const vec3_t dir, const vec3_t point, float degrees);
-void ProjectPointOnPlane(vec3_t dst, const vec3_t p, const vec3_t normal);
-void PerpendicularVector(vec3_t dst, const vec3_t src);
-
-#endif // MATH_H

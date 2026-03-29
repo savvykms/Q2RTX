@@ -18,23 +18,31 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "server.h"
 #include "client/input.h"
+#include "shared/debug.h"
 
 pmoveParams_t   sv_pmp;
 
-LIST_DECL(sv_masterlist);   // address of group servers
+master_t    sv_masters[MAX_MASTERS];   // address of group servers
+
 LIST_DECL(sv_banlist);
 LIST_DECL(sv_blacklist);
 LIST_DECL(sv_cmdlist_connect);
 LIST_DECL(sv_cmdlist_begin);
+LIST_DECL(sv_lrconlist);
 LIST_DECL(sv_filterlist);
+LIST_DECL(sv_cvarbanlist);
+LIST_DECL(sv_infobanlist);
 LIST_DECL(sv_clientlist);   // linked list of non-free clients
 
 client_t    *sv_client;         // current client
 edict_t     *sv_player;         // current client edict
 
-qboolean     sv_pending_autosave = 0;
+bool     sv_pending_autosave = 0;
 
 cvar_t  *sv_enforcetime;
+cvar_t  *sv_timescale_time;
+cvar_t  *sv_timescale_warn;
+cvar_t  *sv_timescale_kick;
 cvar_t  *sv_allow_nodelta;
 #if USE_FPS
 cvar_t  *sv_fps;
@@ -57,7 +65,6 @@ cvar_t  *sv_novis;
 
 cvar_t  *sv_maxclients;
 cvar_t  *sv_reserved_slots;
-cvar_t  *sv_showclamp;
 cvar_t  *sv_locked;
 cvar_t  *sv_downloadserver;
 cvar_t  *sv_redirect_address;
@@ -65,13 +72,17 @@ cvar_t  *sv_redirect_address;
 cvar_t  *sv_hostname;
 cvar_t  *sv_public;            // should heartbeats be sent
 
-#ifdef _DEBUG
+#if USE_DEBUG
 cvar_t  *sv_debug;
 cvar_t  *sv_pad_packets;
 #endif
 cvar_t  *sv_lan_force_rate;
+cvar_t  *sv_min_rate;
+cvar_t  *sv_max_rate;
 cvar_t  *sv_calcpings_method;
 cvar_t  *sv_changemapcmd;
+cvar_t  *sv_max_download_size;
+cvar_t  *sv_max_packet_entities;
 
 cvar_t  *sv_strafejump_hack;
 cvar_t  *sv_waterjump_hack;
@@ -79,6 +90,7 @@ cvar_t  *sv_waterjump_hack;
 cvar_t  *sv_packetdup_hack;
 #endif
 cvar_t  *sv_allow_map;
+cvar_t  *sv_cinematics;
 #if !USE_CLIENT
 cvar_t  *sv_recycle;
 #endif
@@ -96,11 +108,11 @@ cvar_t  *sv_restrict_rtx;
 
 cvar_t  *sv_allow_unconnected_cmds;
 
+cvar_t  *sv_lrcon_password;
+
 cvar_t  *g_features;
 
-cvar_t  *map_override_path;
-
-qboolean sv_registered;
+static bool     sv_registered;
 
 //============================================================================
 
@@ -110,10 +122,7 @@ void SV_RemoveClient(client_t *client)
         SV_ShutdownClientSend(client);
     }
 
-    if (client->netchan) {
-        Netchan_Close(client->netchan);
-        client->netchan = NULL;
-    }
+    Netchan_Close(&client->netchan);
 
     // unlink them from active client list, but don't clear the list entry
     // itself to make code that traverses client list in a loop happy!
@@ -148,17 +157,11 @@ void SV_CleanClient(client_t *client)
     // close any existing donwload
     SV_CloseDownload(client);
 
-    if (client->version_string) {
-        Z_Free(client->version_string);
-        client->version_string = NULL;
-    }
+    Z_Freep((void**)&client->version_string);
 
     // free baselines allocated for this client
     for (i = 0; i < SV_BASELINES_CHUNKS; i++) {
-        if (client->baselines[i]) {
-            Z_Free(client->baselines[i]);
-            client->baselines[i] = NULL;
-        }
+        Z_Freep((void**)&client->baselines[i]);
     }
 }
 
@@ -194,9 +197,9 @@ static void print_drop_reason(client_t *client, const char *reason, clstate_t ol
                         client->name, prefix, reason);
 
     // print to server console
-    if (COM_DEDICATED && client->netchan)
+    if (COM_DEDICATED)
         Com_Printf("%s[%s]%s%s\n", client->name,
-                   NET_AdrToString(&client->netchan->remote_address),
+                   NET_AdrToString(&client->netchan.remote_address),
                    prefix, reason);
 }
 
@@ -262,7 +265,7 @@ Implements simple token bucket filter. Inspired by xt_limit.c from the Linux
 kernel. Returns true if limit is exceeded.
 ===============
 */
-qboolean SV_RateLimited(ratelimit_t *r)
+bool SV_RateLimited(ratelimit_t *r)
 {
     r->credit += (svs.realtime - r->time) * CREDITS_PER_MSEC;
     r->time = svs.realtime;
@@ -271,10 +274,10 @@ qboolean SV_RateLimited(ratelimit_t *r)
 
     if (r->credit >= r->cost) {
         r->credit -= r->cost;
-        return qfalse;
+        return false;
     }
 
-    return qtrue;
+    return true;
 }
 
 /*
@@ -347,6 +350,10 @@ void SV_RateInit(ratelimit_t *r, const char *s)
     }
 
     rate = (RATE_LIMIT_SCALE * period * mult) / limit;
+    if (!rate) {
+        Com_Printf("Limit too large: %u\n", limit);
+        return;
+    }
 
     p = strchr(p, '*');
     if (p) {
@@ -499,16 +506,13 @@ SVC_Ack
 */
 static void SVC_Ack(void)
 {
-    master_t *m;
+    int i;
 
-    FOR_EACH_MASTER(m) {
-        if (!m->adr.port) {
-            continue;
-        }
-        if (NET_IsEqualBaseAdr(&m->adr, &net_from)) {
+    for (i = 0; i < MAX_MASTERS; i++) {
+        if (NET_IsEqualBaseAdr(&sv_masters[i].adr, &net_from)) {
             Com_DPrintf("Ping acknowledge from %s\n",
                         NET_AdrToString(&net_from));
-            m->last_ack = svs.realtime;
+            sv_masters[i].last_ack = svs.realtime;
             break;
         }
     }
@@ -531,7 +535,7 @@ static void SVC_Info(void)
     if (sv_maxclients->integer == 1)
         return; // ignore in single player
 
-    version = atoi(Cmd_Argv(1));
+    version = Q_atoi(Cmd_Argv(1));
     if (version < PROTOCOL_VERSION_DEFAULT || version > PROTOCOL_VERSION_Q2PRO)
         return; // ignore invalid versions
 
@@ -588,7 +592,7 @@ static void SVC_GetChallenge(void)
         }
     }
 
-    challenge = ((rand() << 16) | rand()) & 0x7fffffff;
+    challenge = Q_rand() & 0x7fffffff;
     if (i == MAX_CHALLENGES) {
         // overwrite the oldest
         svs.challenges[oldest].challenge = challenge;
@@ -620,25 +624,25 @@ typedef struct {
 
     int         maxlength;
     int         nctype;
-    qboolean    has_zlib;
+    bool        has_zlib;
 
     int         reserved;   // hidden client slots
     char        reconnect_var[16];
     char        reconnect_val[16];
 } conn_params_t;
 
-#define __reject(...) \
+#define reject_printf(...) \
     Netchan_OutOfBand(NS_SERVER, &net_from, "print\n" __VA_ARGS__)
 
 // small hack to permit one-line return statement :)
-#define reject(...) __reject(__VA_ARGS__), qfalse
-#define reject2(...) __reject(__VA_ARGS__), NULL
+#define reject(...) reject_printf(__VA_ARGS__), false
+#define reject2(...) reject_printf(__VA_ARGS__), NULL
 
-static qboolean parse_basic_params(conn_params_t *p)
+static bool parse_basic_params(conn_params_t *p)
 {
-    p->protocol = atoi(Cmd_Argv(1));
-    p->qport = atoi(Cmd_Argv(2)) ;
-    p->challenge = atoi(Cmd_Argv(3));
+    p->protocol = Q_atoi(Cmd_Argv(1));
+    p->qport = Q_atoi(Cmd_Argv(2)) ;
+    p->challenge = Q_atoi(Cmd_Argv(3));
 
     // check for invalid protocol version
     if (p->protocol < PROTOCOL_VERSION_OLD ||
@@ -649,19 +653,19 @@ static qboolean parse_basic_params(conn_params_t *p)
     if (p->protocol < PROTOCOL_VERSION_DEFAULT)
         return reject("You need Quake 2 version 3.19 or higher.\n");
 
-    return qtrue;
+    return true;
 }
 
-static qboolean permit_connection(conn_params_t *p)
+static bool permit_connection(conn_params_t *p)
 {
     addrmatch_t *match;
     int i, count;
     client_t *cl;
-    char *s;
+    const char *s;
 
     // loopback clients are permitted without any checks
     if (NET_IsLocalAddress(&net_from))
-        return qtrue;
+        return true;
 
     // see if the challenge is valid
     for (i = 0; i < MAX_CHALLENGES; i++) {
@@ -696,13 +700,13 @@ static qboolean permit_connection(conn_params_t *p)
 
     // link-local IPv6 addresses are permitted without sv_iplimit check
     if (net_from.type == NA_IP6 && NET_IsLanAddress(&net_from))
-        return qtrue;
+        return true;
 
     // limit number of connections from single IPv4 address or /48 IPv6 network
     if (sv_iplimit->integer > 0) {
         count = 0;
         FOR_EACH_CLIENT(cl) {
-            netadr_t *adr = &cl->netchan->remote_address;
+            netadr_t *adr = &cl->netchan.remote_address;
 
             if (net_from.type != adr->type)
                 continue;
@@ -724,10 +728,10 @@ static qboolean permit_connection(conn_params_t *p)
         }
     }
 
-    return qtrue;
+    return true;
 }
 
-static qboolean parse_packet_length(conn_params_t *p)
+static bool parse_packet_length(conn_params_t *p)
 {
     char *s;
 
@@ -736,7 +740,7 @@ static qboolean parse_packet_length(conn_params_t *p)
     if (p->protocol >= PROTOCOL_VERSION_R1Q2) {
         s = Cmd_Argv(5);
         if (*s) {
-            p->maxlength = atoi(s);
+            p->maxlength = Q_atoi(s);
             if (p->maxlength < 0 || p->maxlength > MAX_PACKETLEN_WRITABLE)
                 return reject("Invalid maximum message length.\n");
 
@@ -756,10 +760,10 @@ static qboolean parse_packet_length(conn_params_t *p)
     if (p->maxlength < MIN_PACKETLEN)
         p->maxlength = MIN_PACKETLEN;
 
-    return qtrue;
+    return true;
 }
 
-static qboolean parse_enhanced_params(conn_params_t *p)
+static bool parse_enhanced_params(conn_params_t *p)
 {
     char *s;
 
@@ -767,20 +771,19 @@ static qboolean parse_enhanced_params(conn_params_t *p)
         // set minor protocol version
         s = Cmd_Argv(6);
         if (*s) {
-            p->version = atoi(s);
-            clamp(p->version,
-                  PROTOCOL_VERSION_R1Q2_MINIMUM,
-                  PROTOCOL_VERSION_R1Q2_CURRENT);
+            p->version = Q_clip(Q_atoi(s),
+                PROTOCOL_VERSION_R1Q2_MINIMUM,
+                PROTOCOL_VERSION_R1Q2_CURRENT);
         } else {
             p->version = PROTOCOL_VERSION_R1Q2_MINIMUM;
         }
         p->nctype = NETCHAN_OLD;
-        p->has_zlib = qtrue;
+        p->has_zlib = true;
     } else if (p->protocol == PROTOCOL_VERSION_Q2PRO) {
         // set netchan type
         s = Cmd_Argv(6);
         if (*s) {
-            p->nctype = atoi(s);
+            p->nctype = Q_atoi(s);
             if (p->nctype < NETCHAN_OLD || p->nctype > NETCHAN_NEW)
                 return reject("Invalid netchan type.\n");
         } else {
@@ -789,19 +792,14 @@ static qboolean parse_enhanced_params(conn_params_t *p)
 
         // set zlib
         s = Cmd_Argv(7);
-        if (*s) {
-            p->has_zlib = !!atoi(s);
-        } else {
-            p->has_zlib = qtrue;
-        }
+        p->has_zlib = !*s || Q_atoi(s);
 
         // set minor protocol version
         s = Cmd_Argv(8);
         if (*s) {
-            p->version = atoi(s);
-            clamp(p->version,
-                  PROTOCOL_VERSION_Q2PRO_MINIMUM,
-                  PROTOCOL_VERSION_Q2PRO_CURRENT);
+            p->version = Q_clip(Q_atoi(s),
+                PROTOCOL_VERSION_Q2PRO_MINIMUM,
+                PROTOCOL_VERSION_Q2PRO_CURRENT);
             if (p->version == PROTOCOL_VERSION_Q2PRO_RESERVED) {
                 p->version--; // never use this version
             }
@@ -810,15 +808,20 @@ static qboolean parse_enhanced_params(conn_params_t *p)
         }
     }
 
-    return qtrue;
+    if (!CLIENT_COMPATIBLE(&svs.csr, p)) {
+        return reject("This is a protocol limit removing enhanced server.\n"
+                      "Your client version is not compatible. Make sure you are "
+                      "running latest Q2PRO client version.\n");
+    }
+
+    return true;
 }
 
 static char *userinfo_ip_string(void)
 {
-    static char s[MAX_QPATH];
-
     // fake up reserved IPv4 address to prevent IPv6 unaware mods from exploding
     if (net_from.type == NA_IP6 && !(g_features->integer & GMF_IPV6_ADDRESS_AWARE)) {
+        static char s[MAX_QPATH];
         uint8_t res = 0;
         int i;
 
@@ -833,9 +836,10 @@ static char *userinfo_ip_string(void)
     return NET_AdrToString(&net_from);
 }
 
-static qboolean parse_userinfo(conn_params_t *params, char *userinfo)
+static bool parse_userinfo(conn_params_t *params, char *userinfo)
 {
     char *info, *s;
+    cvarban_t *ban;
 
     // validate userinfo
     info = Cmd_Argv(4);
@@ -900,7 +904,15 @@ static qboolean parse_userinfo(conn_params_t *params, char *userinfo)
             return reject("Oversize userinfo string.\n");
     }
 
-    return qtrue;
+    // reject if there is a kickable userinfo ban
+    if ((ban = SV_CheckInfoBans(userinfo, true)) != NULL) {
+        s = ban->comment;
+        if (!s)
+            s = "Userinfo banned.";
+        return reject("%s\nConnection refused.\n", s);
+    }
+
+    return true;
 }
 
 static client_t *redirect(const char *addr)
@@ -929,10 +941,10 @@ static client_t *find_client_slot(conn_params_t *params)
 
     // if there is already a slot for this ip, reuse it
     FOR_EACH_CLIENT(cl) {
-        if (NET_IsEqualAdr(&net_from, &cl->netchan->remote_address)) {
+        if (NET_IsEqualAdr(&net_from, &cl->netchan.remote_address)) {
             if (cl->state == cs_zombie) {
-                strcpy(params->reconnect_var, cl->reconnect_var);
-                strcpy(params->reconnect_val, cl->reconnect_val);
+                Q_strlcpy(params->reconnect_var, cl->reconnect_var, sizeof(params->reconnect_var));
+                Q_strlcpy(params->reconnect_val, cl->reconnect_val, sizeof(params->reconnect_val));
             } else {
                 SV_DropClient(cl, "reconnected");
             }
@@ -972,7 +984,7 @@ static void init_pmove_and_es_flags(client_t *newcl)
 
     // copy default pmove parameters
     newcl->pmp = sv_pmp;
-    newcl->pmp.airaccelerate = sv_airaccelerate->integer ? qtrue : qfalse;
+    newcl->pmp.airaccelerate = sv_airaccelerate->integer;
 
     // common extensions
     force = 2;
@@ -980,7 +992,7 @@ static void init_pmove_and_es_flags(client_t *newcl)
         newcl->pmp.speedmult = 2;
         force = 1;
     }
-    newcl->pmp.strafehack = sv_strafejump_hack->integer >= force ? qtrue : qfalse;
+    newcl->pmp.strafehack = sv_strafejump_hack->integer >= force;
 
     // r1q2 extensions
     if (newcl->protocol == PROTOCOL_VERSION_R1Q2) {
@@ -996,20 +1008,18 @@ static void init_pmove_and_es_flags(client_t *newcl)
         if (sv_qwmod->integer) {
             PmoveEnableQW(&newcl->pmp);
         }
-        newcl->pmp.flyhack = qtrue;
+        newcl->pmp.flyhack = true;
         newcl->pmp.flyfriction = 4;
-        newcl->esFlags |= MSG_ES_UMASK;
-        if (newcl->version >= PROTOCOL_VERSION_Q2PRO_LONG_SOLID) {
-            newcl->esFlags |= MSG_ES_LONGSOLID;
-        }
+        newcl->esFlags |= MSG_ES_UMASK | MSG_ES_LONGSOLID;
         if (newcl->version >= PROTOCOL_VERSION_Q2PRO_BEAM_ORIGIN) {
             newcl->esFlags |= MSG_ES_BEAMORIGIN;
         }
-        if (newcl->version >= PROTOCOL_VERSION_Q2PRO_WATERJUMP_HACK) {
-            force = 1;
+        if (svs.csr.extended) {
+            newcl->esFlags |= MSG_ES_EXTENSIONS;
         }
+        force = 1;
     }
-    newcl->pmp.waterhack = sv_waterjump_hack->integer >= force ? qtrue : qfalse;
+    newcl->pmp.waterhack = sv_waterjump_hack->integer >= force;
 }
 
 static void send_connect_packet(client_t *newcl, int nctype)
@@ -1099,14 +1109,15 @@ static void SVC_DirectConnect(void)
     newcl->edict = EDICT_NUM(number + 1);
     newcl->gamedir = fs_game->string;
     newcl->mapname = sv.name;
-    newcl->configstrings = (char *)sv.configstrings;
-    newcl->pool = (edict_pool_t *)&ge->edicts;
+    newcl->configstrings = sv.configstrings;
+    newcl->csr = &svs.csr;
+    newcl->ge = ge;
     newcl->cm = &sv.cm;
     newcl->spawncount = sv.spawncount;
     newcl->maxclients = sv_maxclients->integer;
 	newcl->last_valid_cluster = -1;
-    strcpy(newcl->reconnect_var, params.reconnect_var);
-    strcpy(newcl->reconnect_val, params.reconnect_val);
+    Q_strlcpy(newcl->reconnect_var, params.reconnect_var, sizeof(newcl->reconnect_var));
+    Q_strlcpy(newcl->reconnect_val, params.reconnect_val, sizeof(newcl->reconnect_val));
 #if USE_FPS
     newcl->framediv = sv.framediv;
     newcl->settings[CLS_FPS] = BASE_FRAMERATE;
@@ -1125,18 +1136,16 @@ static void SVC_DirectConnect(void)
     if (!allow) {
         reason = Info_ValueForKey(userinfo, "rejmsg");
         if (*reason) {
-            __reject("%s\nConnection refused.\n", reason);
+            reject_printf("%s\nConnection refused.\n", reason);
         } else {
-            __reject("Connection refused.\n");
+            reject_printf("Connection refused.\n");
         }
         return;
     }
 
     // setup netchan
-    newcl->netchan = Netchan_Setup(NS_SERVER, params.nctype,
-                                   &net_from, params.qport,
-                                   params.maxlength,
-                                   params.protocol);
+    Netchan_Setup(&newcl->netchan, NS_SERVER, params.nctype, &net_from,
+                  params.qport, params.maxlength, params.protocol);
     newcl->numpackets = 1;
 
     // parse some info from the info strings
@@ -1158,7 +1167,7 @@ static void SVC_DirectConnect(void)
 
     // loopback client doesn't need to reconnect
     if (NET_IsLocalAddress(&net_from)) {
-        newcl->reconnected = qtrue;
+        newcl->reconnected = true;
     }
 
     // add them to the linked list of connected clients
@@ -1173,15 +1182,32 @@ static void SVC_DirectConnect(void)
     newcl->min_ping = 9999;
 }
 
-static qboolean rcon_valid(void)
+typedef enum {
+    RCON_BAD,
+    RCON_OK,
+    RCON_LIMITED
+} rcon_type_t;
+
+static rcon_type_t rcon_validate(void)
 {
-    if (!rcon_password->string[0])
-        return qfalse;
+    if (rcon_password->string[0] && !strcmp(Cmd_Argv(1), rcon_password->string))
+        return RCON_OK;
 
-    if (strcmp(Cmd_Argv(1), rcon_password->string))
-        return qfalse;
+    if (sv_lrcon_password->string[0] && !strcmp(Cmd_Argv(1), sv_lrcon_password->string))
+        return RCON_LIMITED;
 
-    return qtrue;
+    return RCON_BAD;
+}
+
+static bool lrcon_validate(const char *s)
+{
+    stuffcmd_t *cmd;
+
+    LIST_FOR_EACH(stuffcmd_t, cmd, &sv_lrconlist, entry)
+        if (!strncmp(s, cmd->string, strlen(cmd->string)))
+            return true;
+
+    return false;
 }
 
 /*
@@ -1194,6 +1220,7 @@ Redirect all printfs.
 */
 static void SVC_RemoteCommand(void)
 {
+    rcon_type_t type;
     char *s;
 
     if (SV_RateLimited(&svs.ratelimit_rcon)) {
@@ -1202,25 +1229,44 @@ static void SVC_RemoteCommand(void)
         return;
     }
 
+    type = rcon_validate();
     s = Cmd_RawArgsFrom(2);
-    if (!rcon_valid()) {
+    if (type == RCON_BAD) {
         Com_Printf("Invalid rcon from %s:\n%s\n",
                    NET_AdrToString(&net_from), s);
-        Netchan_OutOfBand(NS_SERVER, &net_from,
-                          "print\nBad rcon_password.\n");
+        OOB_PRINT(NS_SERVER, &net_from, "print\nBad rcon_password.\n");
         return;
     }
 
-    // valid rcon packets are not rate limited
+    // authenticated rcon packets are not rate limited
     SV_RateRecharge(&svs.ratelimit_rcon);
 
-	if (dedicated->integer)
-	{
-		Com_Printf("Rcon from %s: \"%s\"\n", NET_AdrToString(&net_from), s);
-	}
+    if (type == RCON_LIMITED && lrcon_validate(s) == false) {
+        Com_Printf("Invalid limited rcon from %s:\n%s\n",
+                   NET_AdrToString(&net_from), s);
+        OOB_PRINT(NS_SERVER, &net_from,
+                  "print\nThis command is not permitted.\n");
+        return;
+    }
+
+    if (type == RCON_LIMITED) {
+        Com_NPrintf("Limited rcon from %s:\n%s\n",
+                    NET_AdrToString(&net_from), s);
+    } else {
+        Com_NPrintf("Rcon from %s:\n%s\n",
+                    NET_AdrToString(&net_from), s);
+    }
 
     SV_PacketRedirect();
-    Cmd_ExecuteString(&cmd_buffer, s);
+    if (type == RCON_LIMITED) {
+        // shift args down
+        Cmd_Shift();
+        Cmd_Shift();
+    } else {
+        // macro expand args
+        Cmd_TokenizeString(s, true);
+    }
+    Cmd_ExecuteCommand(&cmd_buffer);
     Com_EndRedirect();
 }
 
@@ -1249,7 +1295,6 @@ static void SV_ConnectionlessPacket(void)
     char    string[MAX_STRING_CHARS];
     char    *c;
     int     i;
-    size_t  len;
 
     if (SV_MatchAddress(&sv_blacklist, &net_from)) {
         Com_DPrintf("ignored blackholed connectionless packet\n");
@@ -1259,13 +1304,12 @@ static void SV_ConnectionlessPacket(void)
     MSG_BeginReading();
     MSG_ReadLong();        // skip the -1 marker
 
-    len = MSG_ReadStringLine(string, sizeof(string));
-    if (len >= sizeof(string)) {
+    if (MSG_ReadStringLine(string, sizeof(string)) >= sizeof(string)) {
         Com_DPrintf("ignored oversize connectionless packet\n");
         return;
     }
 
-    Cmd_TokenizeString(string, qfalse);
+    Cmd_TokenizeString(string, false);
 
     c = Cmd_Argv(0);
     Com_DPrintf("ServerPacket[%s]: %s\n", NET_AdrToString(&net_from), c);
@@ -1414,11 +1458,30 @@ static void SV_GiveMsec(void)
 {
     client_t    *cl;
 
-    if (sv.framenum % (16 * SV_FRAMEDIV))
+    if (!(sv.framenum % (16 * SV_FRAMEDIV))) {
+        FOR_EACH_CLIENT(cl) {
+            cl->command_msec = 1800; // 1600 + some slop
+        }
+    }
+
+    if (svs.realtime - svs.last_timescale_check < sv_timescale_time->integer)
         return;
 
+    float d = svs.realtime - svs.last_timescale_check;
+    svs.last_timescale_check = svs.realtime;
+
     FOR_EACH_CLIENT(cl) {
-        cl->command_msec = 1800; // 1600 + some slop
+        cl->timescale = cl->cmd_msec_used / d;
+        cl->cmd_msec_used = 0;
+
+        if (sv_timescale_warn->value > 1.0f && cl->timescale > sv_timescale_warn->value) {
+            Com_Printf("%s[%s]: detected time skew: %.3f\n", cl->name,
+                       NET_AdrToString(&cl->netchan.remote_address), cl->timescale);
+        }
+
+        if (sv_timescale_kick->value > 1.0f && cl->timescale > sv_timescale_kick->value) {
+            SV_DropClient(cl, "time skew too high");
+        }
     }
 }
 
@@ -1434,6 +1497,10 @@ static void SV_PacketEvent(void)
     netchan_t   *netchan;
     int         qport;
 
+    if (msg_read.cursize < 4) {
+        return;
+    }
+
     // check for connectionless packet (0xffffffff) first
     // connectionless packets are processed even if the server is down
     if (*(int *)msg_read.data == -1) {
@@ -1447,7 +1514,7 @@ static void SV_PacketEvent(void)
 
     // check for packets from connected clients
     FOR_EACH_CLIENT(client) {
-        netchan = client->netchan;
+        netchan = &client->netchan;
         if (!NET_IsEqualBaseAdr(&net_from, &netchan->remote_address)) {
             continue;
         }
@@ -1455,11 +1522,17 @@ static void SV_PacketEvent(void)
         // read the qport out of the message so we can fix up
         // stupid address translating routers
         if (client->protocol == PROTOCOL_VERSION_DEFAULT) {
-            qport = msg_read.data[8] | (msg_read.data[9] << 8);
+            if (msg_read.cursize < PACKET_HEADER) {
+                continue;
+            }
+            qport = RL16(&msg_read.data[8]);
             if (netchan->qport != qport) {
                 continue;
             }
         } else if (netchan->qport) {
+            if (msg_read.cursize < PACKET_HEADER - 1) {
+                continue;
+            }
             qport = msg_read.data[8];
             if (netchan->qport != qport) {
                 continue;
@@ -1485,7 +1558,7 @@ static void SV_PacketEvent(void)
         // this is a valid, sequenced packet, so process it
         client->lastmessage = svs.realtime;    // don't timeout
 #if USE_ICMP
-        client->unreachable = qfalse; // don't drop
+        client->unreachable = false; // don't drop
 #endif
         if (netchan->dropped > 0)
             client->frameflags |= FF_CLIENTDROP;
@@ -1501,7 +1574,7 @@ static void SV_PacketEvent(void)
 // Total 64 bytes of headers is assumed.
 static void update_client_mtu(client_t *client, int ee_info)
 {
-    netchan_t *netchan = client->netchan;
+    netchan_t *netchan = &client->netchan;
     size_t newpacketlen;
 
     // sanity check discovered MTU
@@ -1522,7 +1595,7 @@ static void update_client_mtu(client_t *client, int ee_info)
     if (newpacketlen >= netchan->maxpacketlen)
         return;
 
-    Com_Printf("Fixing up maxmsglen for %s: %"PRIz" --> %"PRIz"\n",
+    Com_Printf("Fixing up maxmsglen for %s: %zu --> %zu\n",
                client->name, netchan->maxpacketlen, newpacketlen);
     netchan->maxpacketlen = newpacketlen;
 }
@@ -1548,7 +1621,7 @@ void SV_ErrorEvent(netadr_t *from, int ee_errno, int ee_info)
         if (client->state == cs_zombie) {
             continue; // already a zombie
         }
-        netchan = client->netchan;
+        netchan = &client->netchan;
         if (!NET_IsEqualBaseAdr(from, &netchan->remote_address)) {
             continue;
         }
@@ -1562,7 +1635,7 @@ void SV_ErrorEvent(netadr_t *from, int ee_errno, int ee_info)
             continue;
         }
 #endif
-        client->unreachable = qtrue; // drop them soon
+        client->unreachable = true; // drop them soon
         break;
     }
 }
@@ -1583,21 +1656,17 @@ if necessary
 static void SV_CheckTimeouts(void)
 {
     client_t    *client;
-    unsigned    zombie_time = 1000 * sv_zombietime->value;
-    unsigned    drop_time   = 1000 * sv_timeout->value;
-    unsigned    ghost_time  = 1000 * sv_ghostime->value;
-    unsigned    idle_time   = 1000 * sv_idlekick->value;
     unsigned    delta;
 
     FOR_EACH_CLIENT(client) {
         // never timeout local clients
-        if (NET_IsLocalAddress(&client->netchan->remote_address)) {
+        if (NET_IsLocalAddress(&client->netchan.remote_address)) {
             continue;
         }
         // NOTE: delta calculated this way is not sensitive to overflow
         delta = svs.realtime - client->lastmessage;
         if (client->state == cs_zombie) {
-            if (delta > zombie_time) {
+            if (delta > sv_zombietime->integer) {
                 SV_RemoveClient(client);
             }
             continue;
@@ -1608,14 +1677,14 @@ static void SV_CheckTimeouts(void)
         }
 #if USE_ICMP
         if (client->unreachable) {
-            if (delta > ghost_time) {
+            if (delta > sv_ghostime->integer) {
                 SV_DropClient(client, "connection reset by peer");
                 SV_RemoveClient(client);      // don't bother with zombie state
                 continue;
             }
         }
 #endif
-        if (delta > drop_time || (client->state == cs_assigned && delta > ghost_time)) {
+        if (delta > sv_timeout->integer || (client->state == cs_assigned && delta > sv_ghostime->integer)) {
             SV_DropClient(client, "?timed out");
             SV_RemoveClient(client);      // don't bother with zombie state
             continue;
@@ -1626,8 +1695,7 @@ static void SV_CheckTimeouts(void)
             continue;
         }
 
-        delta = svs.realtime - client->lastactivity;
-        if (idle_time && delta > idle_time) {
+        if (sv_idlekick->integer && svs.realtime - client->lastactivity > sv_idlekick->integer) {
             SV_DropClient(client, "idling");
             continue;
         }
@@ -1654,8 +1722,6 @@ static void SV_PrepWorldFrame(void)
     }
 #endif
 
-    sv.tracecount = 0;
-
     if (!SV_FRAMESYNC)
         return;
 
@@ -1668,7 +1734,7 @@ static void SV_PrepWorldFrame(void)
 }
 
 // pause if there is only local client on the server
-static inline qboolean check_paused(void)
+static inline bool check_paused(void)
 {
 #if USE_CLIENT
     if (dedicated->integer)
@@ -1693,7 +1759,7 @@ static inline qboolean check_paused(void)
         IN_Activate();
     }
 
-    return qtrue; // don't run if paused
+    return true; // don't run if paused
 
 resume:
     if (sv_paused->integer) {
@@ -1702,7 +1768,7 @@ resume:
     }
 #endif
 
-    return qfalse;
+    return false;
 }
 
 /*
@@ -1720,12 +1786,7 @@ static void SV_RunGameFrame(void)
         time_before_game = Sys_Milliseconds();
 #endif
 
-    X86_PUSH_FPCW;
-    X86_SINGLE_FPCW;
-
     ge->RunFrame();
-
-    X86_POP_FPCW;
 
 #if USE_CLIENT
     if (host_speeds->integer)
@@ -1733,7 +1794,7 @@ static void SV_RunGameFrame(void)
 #endif
 
     if (msg_write.cursize) {
-        Com_WPrintf("Game left %"PRIz" bytes "
+        Com_WPrintf("Game left %zu bytes "
                     "in multicast buffer, cleared.\n",
                     msg_write.cursize);
         SZ_Clear(&msg_write);
@@ -1755,7 +1816,7 @@ static void SV_MasterHeartbeat(void)
 {
     char    buffer[MAX_PACKETLEN_DEFAULT];
     size_t  len;
-    master_t *m;
+    master_t *send = NULL;
 
     if (!COM_DEDICATED)
         return;        // only dedicated servers send heartbeats
@@ -1766,7 +1827,21 @@ static void SV_MasterHeartbeat(void)
     if (svs.realtime - svs.last_heartbeat < HEARTBEAT_SECONDS * 1000)
         return;        // not time to send yet
 
-    svs.last_heartbeat = svs.realtime;
+    // find the next master to send to
+    while (svs.heartbeat_index < MAX_MASTERS) {
+        master_t *m = &sv_masters[svs.heartbeat_index++];
+        if (m->adr.type) {
+            send = m;
+            break;
+        }
+    }
+    if (svs.heartbeat_index == MAX_MASTERS ||
+        sv_masters[svs.heartbeat_index].name == NULL) {
+        svs.last_heartbeat = svs.realtime;
+        svs.heartbeat_index = 0;
+    }
+    if (!send)
+        return;
 
     // write the packet header
     memcpy(buffer, "\xff\xff\xff\xffheartbeat\n", 14);
@@ -1776,13 +1851,8 @@ static void SV_MasterHeartbeat(void)
     len += SV_StatusString(buffer + len);
 
     // send to group master
-    FOR_EACH_MASTER(m) {
-        if (m->adr.port) {
-            Com_DPrintf("Sending heartbeat to %s\n",
-                        NET_AdrToString(&m->adr));
-            NET_SendPacket(NS_SERVER, buffer, len, &m->adr);
-        }
-    }
+    Com_DPrintf("Sending heartbeat to %s\n", NET_AdrToString(&send->adr));
+    NET_SendPacket(NS_SERVER, buffer, len, &send->adr);
 }
 
 /*
@@ -1794,11 +1864,11 @@ Informs all masters that this server is going down
 */
 static void SV_MasterShutdown(void)
 {
-    master_t *m;
+    int i;
 
     // reset ack times
-    FOR_EACH_MASTER(m) {
-        m->last_ack = 0;
+    for (i = 0; i < MAX_MASTERS; i++) {
+        sv_masters[i].last_ack = 0;
     }
 
     if (!COM_DEDICATED)
@@ -1808,8 +1878,9 @@ static void SV_MasterShutdown(void)
         return;        // a private dedicated game
 
     // send to group master
-    FOR_EACH_MASTER(m) {
-        if (m->adr.port) {
+    for (i = 0; i < MAX_MASTERS; i++) {
+        master_t *m = &sv_masters[i];
+        if (m->adr.type) {
             Com_DPrintf("Sending shutdown to %s\n",
                         NET_AdrToString(&m->adr));
             OOB_PRINT(NS_SERVER, &m->adr, "shutdown");
@@ -1894,9 +1965,7 @@ unsigned SV_Frame(unsigned msec)
 
     if (COM_DEDICATED) {
         // run cmd buffer in dedicated mode
-        if (cmd_buffer.waitCount > 0) {
-            cmd_buffer.waitCount--;
-        }
+        Cbuf_Frame(&cmd_buffer);
     }
 
     // decide how long to sleep next frame
@@ -1946,61 +2015,62 @@ void SV_UserinfoChanged(client_t *cl)
     if (cl->name[0] && strcmp(cl->name, name)) {
         if (COM_DEDICATED) {
             Com_Printf("%s[%s] changed name to %s\n", cl->name,
-                       NET_AdrToString(&cl->netchan->remote_address), name);
+                       NET_AdrToString(&cl->netchan.remote_address), name);
         }
 #if USE_MVD_CLIENT
         if (sv.state == ss_broadcast) {
             MVD_GameClientNameChanged(cl->edict, name);
         } else
 #endif
-            if (sv_show_name_changes->integer) {
-                SV_BroadcastPrintf(PRINT_HIGH, "%s changed name to %s\n",
-                                   cl->name, name);
-            }
+        if (sv_show_name_changes->integer > 1 ||
+            (sv_show_name_changes->integer == 1 && cl->state == cs_spawned)) {
+            SV_BroadcastPrintf(PRINT_HIGH, "%s changed name to %s\n",
+                               cl->name, name);
+        }
     }
     memcpy(cl->name, name, len + 1);
 
     // rate command
     val = Info_ValueForKey(cl->userinfo, "rate");
     if (*val) {
-        cl->rate = atoi(val);
-        clamp(cl->rate, 100, 15000);
+        cl->rate = Q_clip(Q_atoi(val), sv_min_rate->integer, sv_max_rate->integer);
     } else {
         cl->rate = 5000;
     }
 
     // never drop over the loopback
-    if (NET_IsLocalAddress(&cl->netchan->remote_address)) {
+    if (NET_IsLocalAddress(&cl->netchan.remote_address)) {
         cl->rate = 0;
     }
 
     // don't drop over LAN connections
     if (sv_lan_force_rate->integer &&
-        NET_IsLanAddress(&cl->netchan->remote_address)) {
+        NET_IsLanAddress(&cl->netchan.remote_address)) {
         cl->rate = 0;
     }
 
     // msg command
     val = Info_ValueForKey(cl->userinfo, "msg");
     if (*val) {
-        cl->messagelevel = atoi(val);
-        clamp(cl->messagelevel, PRINT_LOW, PRINT_CHAT + 1);
+        cl->messagelevel = Q_clip(Q_atoi(val), PRINT_LOW, PRINT_CHAT + 1);
     }
 }
 
 
 //============================================================================
 
+void SV_RestartFilesystem(void)
+{
+    if (gex && gex->RestartFilesystem)
+        gex->RestartFilesystem();
+}
+
 #if USE_SYSCON
 void SV_SetConsoleTitle(void)
 {
-    char buffer[MAX_STRING_CHARS];
-
-    Q_snprintf(buffer, sizeof(buffer), "%s (port %d%s)",
-               sv_hostname->string, net_port->integer,
-               sv_running->integer ? "" : ", down");
-
-    Sys_SetConsoleTitle(buffer);
+    Sys_SetConsoleTitle(va("%s (port %d%s)",
+        sv_hostname->string, net_port->integer,
+        sv_running->integer ? "" : ", down"));
 }
 #endif
 
@@ -2024,6 +2094,21 @@ static void init_rate_limits(void)
     SV_RateInit(&svs.ratelimit_status, sv_status_limit->string);
     SV_RateInit(&svs.ratelimit_auth, sv_auth_limit->string);
     SV_RateInit(&svs.ratelimit_rcon, sv_rcon_limit->string);
+}
+
+static void sv_rate_changed(cvar_t *self)
+{
+    Cvar_ClampInteger(sv_min_rate, 1500, Cvar_ClampInteger(sv_max_rate, 1500, INT_MAX));
+}
+
+void sv_sec_timeout_changed(cvar_t *self)
+{
+    self->integer = 1000 * Cvar_ClampValue(self, 0, 24 * 24 * 60 * 60);
+}
+
+void sv_min_timeout_changed(cvar_t *self)
+{
+    self->integer = 1000 * 60 * Cvar_ClampValue(self, 0, 24 * 24 * 60);
 }
 
 static void sv_namechange_limit_changed(cvar_t *self)
@@ -2092,11 +2177,23 @@ void SV_Init(void)
     sv_hostname->changed = sv_hostname_changed;
 #endif
     sv_timeout = Cvar_Get("timeout", "90", 0);
+    sv_timeout->changed = sv_sec_timeout_changed;
+    sv_timeout->changed(sv_timeout);
     sv_zombietime = Cvar_Get("zombietime", "2", 0);
+    sv_zombietime->changed = sv_sec_timeout_changed;
+    sv_zombietime->changed(sv_zombietime);
     sv_ghostime = Cvar_Get("sv_ghostime", "6", 0);
+    sv_ghostime->changed = sv_sec_timeout_changed;
+    sv_ghostime->changed(sv_ghostime);
     sv_idlekick = Cvar_Get("sv_idlekick", "0", 0);
-    sv_showclamp = Cvar_Get("showclamp", "0", 0);
+    sv_idlekick->changed = sv_sec_timeout_changed;
+    sv_idlekick->changed(sv_idlekick);
     sv_enforcetime = Cvar_Get("sv_enforcetime", "1", 0);
+    sv_timescale_time = Cvar_Get("sv_timescale_time", "16", 0);
+    sv_timescale_time->changed = sv_sec_timeout_changed;
+    sv_timescale_time->changed(sv_timescale_time);
+    sv_timescale_warn = Cvar_Get("sv_timescale_warn", "0", 0);
+    sv_timescale_kick = Cvar_Get("sv_timescale_kick", "0", 0);
     sv_allow_nodelta = Cvar_Get("sv_allow_nodelta", "1", 0);
 #if USE_FPS
     sv_fps = Cvar_Get("sv_fps", "10", CVAR_LATCH);
@@ -2114,22 +2211,29 @@ void SV_Init(void)
     sv_downloadserver = Cvar_Get("sv_downloadserver", "", 0);
     sv_redirect_address = Cvar_Get("sv_redirect_address", "", 0);
 
-#ifdef _DEBUG
+#if USE_DEBUG
     sv_debug = Cvar_Get("sv_debug", "0", 0);
     sv_pad_packets = Cvar_Get("sv_pad_packets", "0", 0);
 #endif
     sv_lan_force_rate = Cvar_Get("sv_lan_force_rate", "0", CVAR_LATCH);
+    sv_min_rate = Cvar_Get("sv_min_rate", "1500", CVAR_LATCH);
+    sv_max_rate = Cvar_Get("sv_max_rate", "15000", CVAR_LATCH);
+    sv_max_rate->changed = sv_min_rate->changed = sv_rate_changed;
+    sv_max_rate->changed(sv_max_rate);
     sv_calcpings_method = Cvar_Get("sv_calcpings_method", "2", 0);
     sv_changemapcmd = Cvar_Get("sv_changemapcmd", "", 0);
+    sv_max_download_size = Cvar_Get("sv_max_download_size", "8388608", 0);
+    sv_max_packet_entities = Cvar_Get("sv_max_packet_entities", "0", 0);
 
     sv_strafejump_hack = Cvar_Get("sv_strafejump_hack", "1", CVAR_LATCH);
-    sv_waterjump_hack = Cvar_Get("sv_waterjump_hack", "0", CVAR_LATCH);
+    sv_waterjump_hack = Cvar_Get("sv_waterjump_hack", "1", CVAR_LATCH);
 
 #if USE_PACKETDUP
     sv_packetdup_hack = Cvar_Get("sv_packetdup_hack", "0", 0);
 #endif
 
     sv_allow_map = Cvar_Get("sv_allow_map", "0", 0);
+    sv_cinematics = Cvar_Get("sv_cinematics", "1", 0);
 
 #if !USE_CLIENT
     sv_recycle = Cvar_Get("sv_recycle", "0", 0);
@@ -2159,10 +2263,10 @@ void SV_Init(void)
 
     sv_allow_unconnected_cmds = Cvar_Get("sv_allow_unconnected_cmds", "0", 0);
 
+    sv_lrcon_password = Cvar_Get("lrcon_password", "", CVAR_PRIVATE);
+
     Cvar_Get("sv_features", va("%d", SV_FEATURES), CVAR_ROM);
     g_features = Cvar_Get("g_features", "0", CVAR_ROM);
-
-    map_override_path = Cvar_Get("map_override_path", "", 0);
 
     init_rate_limits();
 
@@ -2178,7 +2282,7 @@ void SV_Init(void)
     SV_SetConsoleTitle();
 #endif
 
-    sv_registered = qtrue;
+    sv_registered = true;
 }
 
 /*
@@ -2220,7 +2324,7 @@ static void SV_FinalMessage(const char *message, error_type_t type)
             if (client->state == cs_zombie) {
                 continue;
             }
-            netchan = client->netchan;
+            netchan = &client->netchan;
             while (netchan->fragment_pending) {
                 netchan->TransmitNextFragment(netchan);
             }
@@ -2254,6 +2358,8 @@ void SV_Shutdown(const char *finalmsg, error_type_t type)
     if (!sv_registered)
         return;
 
+    R_ClearDebugLines();    // for local system
+
 #if USE_MVD_CLIENT
     if (ge != &mvd_ge && !(type & MVD_SPAWN_INTERNAL)) {
         // shutdown MVD client now if not already running the built-in MVD game module
@@ -2273,7 +2379,6 @@ void SV_Shutdown(const char *finalmsg, error_type_t type)
 
     // free current level
     CM_FreeMap(&sv.cm);
-    SV_FreeFile(sv.entitystring);
     memset(&sv, 0, sizeof(sv));
 
     // free server static data
@@ -2281,6 +2386,7 @@ void SV_Shutdown(const char *finalmsg, error_type_t type)
     Z_Free(svs.entities);
 #if USE_ZLIB
     deflateEnd(&svs.z);
+    Z_Free(svs.z_buffer);
 #endif
     memset(&svs, 0, sizeof(svs));
 

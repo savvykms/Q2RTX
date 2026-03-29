@@ -18,6 +18,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 // client.h -- primary header for client
 
+#pragma once
+
 #include "shared/shared.h"
 #include "shared/list.h"
 
@@ -28,19 +30,19 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/cvar.h"
 #include "common/field.h"
 #include "common/files.h"
-#include "common/pmove.h"
 #include "common/math.h"
 #include "common/msg.h"
 #include "common/net/chan.h"
 #include "common/net/net.h"
+#include "common/pmove.h"
 #include "common/prompt.h"
 #include "common/protocol.h"
 #include "common/sizebuf.h"
 #include "common/zone.h"
 
-#include "system/system.h"
 #include "refresh/refresh.h"
 #include "server/server.h"
+#include "system/system.h"
 
 #include "client/client.h"
 #include "client/input.h"
@@ -82,11 +84,27 @@ typedef struct {
 
 extern explosion_t  cl_explosions[MAX_EXPLOSIONS];
 
+// Hack to merge two structures AND still allow to address them separately.
+// Requires non-standard Microsoft extension to compile. FIXME: remove this?
+typedef union {
+    struct {
+        entity_state_t;
+        entity_state_extension_t;
+    };
+    struct {
+        entity_state_t s;
+        entity_state_extension_t x;
+    };
+} centity_state_t;
+
+#define CL_PackEntity(out, in)  MSG_PackEntity(out, &(in)->s, &(in)->x)
+
 typedef struct centity_s {
-    entity_state_t    current;
-    entity_state_t    prev;            // will always be valid, but might just be a copy of current
+    centity_state_t     current;
+    centity_state_t     prev;           // will always be valid, but might just be a copy of current
 
     vec3_t          mins, maxs;
+    float           radius;             // from mid point
 
     int             serverframe;        // if not current, this ent isn't in the frame
 
@@ -102,12 +120,14 @@ typedef struct centity_s {
 
     int             fly_stoptime;
 
+    float           flashlightfrac;
+
     int             id;
 } centity_t;
 
 extern centity_t    cl_entities[MAX_EDICTS];
 
-#define MAX_CLIENTWEAPONMODELS        20        // PGM -- upped from 16 to fit the chainfist vwep
+#define MAX_CLIENTWEAPONMODELS        256       // PGM -- upped from 16 to fit the chainfist vwep
 
 typedef struct clientinfo_s {
     char name[MAX_QPATH];
@@ -126,7 +146,7 @@ typedef struct {
 } client_history_t;
 
 typedef struct {
-    qboolean        valid;
+    bool            valid;
 
     int             number;
     int             delta;
@@ -142,11 +162,11 @@ typedef struct {
 } server_frame_t;
 
 // locally calculated frame flags for debug display
-#define FF_SERVERDROP   (1<<4)
-#define FF_BADFRAME     (1<<5)
-#define FF_OLDFRAME     (1<<6)
-#define FF_OLDENT       (1<<7)
-#define FF_NODELTA      (1<<8)
+#define FF_SERVERDROP   BIT(4)
+#define FF_BADFRAME     BIT(5)
+#define FF_OLDFRAME     BIT(6)
+#define FF_OLDENT       BIT(7)
+#define FF_NODELTA      BIT(8)
 
 // variable server FPS
 #if USE_FPS
@@ -177,7 +197,7 @@ typedef struct client_state_s {
     unsigned    lastTransmitTime;
     unsigned    lastTransmitCmdNumber;
     unsigned    lastTransmitCmdNumberReal;
-    qboolean    sendPacketNow;
+    bool        sendPacketNow;
 
     usercmd_t    cmd;
     usercmd_t    cmds[CMD_BACKUP];    // each mesage will send several old cmds
@@ -199,12 +219,13 @@ typedef struct client_state_s {
     centity_t       *solidEntities[MAX_PACKET_ENTITIES];
     int             numSolidEntities;
 
-    entity_state_t  baselines[MAX_EDICTS];
+    centity_state_t baselines[MAX_EDICTS];
 
-    entity_state_t  entityStates[MAX_PARSE_ENTITIES];
+    centity_state_t entityStates[MAX_PARSE_ENTITIES];
     int             numEntityStates;
 
     msgEsFlags_t    esFlags;
+    msgPsFlags_t    psFlags;
 
     server_frame_t  frames[UPDATE_BACKUP];
     unsigned        frameflags;
@@ -237,10 +258,6 @@ typedef struct client_state_s {
     // localmove and pending cmd, cleared each time cmd is finalized
     vec2_t      mousemove;
 
-#if USE_SMOOTH_DELTA_ANGLES
-    short       delta_angles[3]; // interpolated
-#endif
-
     int         time;           // this is the time value that the client
                                 // is rendering at.  always <= cl.servertime
     float       lerpfrac;       // between oldframe and frame
@@ -257,7 +274,7 @@ typedef struct client_state_s {
 
     vec3_t      v_forward, v_right, v_up;    // set when refdef.angles is set
 
-    qboolean    thirdPersonView;
+    bool        thirdPersonView;
 
     // predicted values, used for smooth player entity movement in thirdperson view
     vec3_t      playerEntityOrigin;
@@ -285,8 +302,10 @@ typedef struct client_state_s {
     int         framediv;       // BASE_FRAMETIME/frametime
 #endif
 
-    char        baseconfigstrings[MAX_CONFIGSTRINGS][MAX_QPATH];
-    char        configstrings[MAX_CONFIGSTRINGS][MAX_QPATH];
+    configstring_t  baseconfigstrings[MAX_CONFIGSTRINGS];
+    configstring_t  configstrings[MAX_CONFIGSTRINGS];
+    cs_remap_t      csr;
+
     char        mapname[MAX_QPATH]; // short format - q2dm1, etc
 
 #if USE_AUTOREPLY
@@ -310,9 +329,11 @@ typedef struct client_state_s {
 
     char    weaponModels[MAX_CLIENTWEAPONMODELS][MAX_QPATH];
     int     numWeaponModels;
+
+    bool    need_powerscreen_scale;
 } client_state_t;
 
-extern    client_state_t    cl;
+extern client_state_t   cl;
 
 /*
 ==================================================================
@@ -359,6 +380,7 @@ typedef enum {
 } dltype_t;
 
 typedef enum {
+    DL_FREE,
     DL_PENDING,
     DL_RUNNING,
     DL_DONE
@@ -371,13 +393,21 @@ typedef struct {
     char        path[1];
 } dlqueue_t;
 
+typedef struct {
+    int         framenum;
+    int64_t     filepos;
+    size_t      msglen;
+    byte        data[1];
+} demosnap_t;
+
 typedef struct client_static_s {
     connstate_t state;
     keydest_t   key_dest;
 
     active_t    active;
 
-    qboolean    ref_initialized;
+    bool        ref_initialized;
+    ref_type_t  ref_type;
     unsigned    disable_screen;
 
     int         userinfo_modified;
@@ -410,7 +440,7 @@ typedef struct client_static_s {
     char        servername[MAX_OSPATH]; // name of server from original connect
     unsigned    connect_time;           // for connection retransmits
     int         connect_count;
-    qboolean    passive;
+    bool        passive;
 
 #if USE_ZLIB
     z_stream    z;
@@ -418,14 +448,14 @@ typedef struct client_static_s {
 
     int         quakePort;          // a 16 bit value that allows quake servers
                                     // to work around address translating routers
-    netchan_t   *netchan;
+    netchan_t   netchan;
     int         serverProtocol;     // in case we are doing some kind of version hack
     int         protocolVersion;    // minor version
 
     int         challenge;          // from the server to use for connecting
 
 #if USE_ICMP
-    qboolean    errorReceived;  // got an ICMP error from server
+    bool        errorReceived;      // got an ICMP error from server
 #endif
 
 #define RECENT_ADDR 4
@@ -434,12 +464,14 @@ typedef struct client_static_s {
     netadr_t    recent_addr[RECENT_ADDR];
     int         recent_head;
 
+    string_entry_t  *stufftextwhitelist;
+
     struct {
         list_t      queue;              // queue of paths we need
         int         pending;            // number of non-finished entries in queue
         dlqueue_t   *current;           // path being downloaded
         int         percent;            // how much downloaded
-        int         position;           // how much downloaded (in bytes)
+        int64_t     position;           // how much downloaded (in bytes)
         qhandle_t   file;               // UDP file transfer from server
         char        temp[MAX_QPATH + 4];// account 4 bytes for .tmp suffix
 #if USE_ZLIB
@@ -460,15 +492,25 @@ typedef struct client_static_s {
         int         others_dropped;     // number of misc svc_* messages that didn't fit
         int         frames_read;        // number of frames read from demo file
         int         last_snapshot;      // number of demo frame the last snapshot was saved
-        int         file_size;
-        int         file_offset;
-        int         file_percent;
+        int64_t     file_size;
+        int64_t     file_offset;
+        float       file_progress;
         sizebuf_t   buffer;
-        list_t      snapshots;
-        qboolean    paused;
-        qboolean    seeking;
-        qboolean    eof;
+        demosnap_t  **snapshots;
+        int         numsnapshots;
+        bool        paused;
+        bool        seeking;
+        bool        eof;
+        msgEsFlags_t    esFlags;        // for snapshots/recording
     } demo;
+    struct {
+        // Number of timedemo runs to perform
+        int         runs_total;
+        // Current run
+        int         run_current;
+        // Results of timedemo runs
+        unsigned    *results;
+    } timedemo;
 
 #if USE_CLIENT_GTV
     struct {
@@ -479,16 +521,17 @@ typedef struct client_static_s {
 
         player_packed_t     ps;
         entity_packed_t     entities[MAX_EDICTS];
+        msgEsFlags_t        esFlags;    // for writing
 
         sizebuf_t       message;
     } gtv;
 #endif
 } client_static_t;
 
-extern client_static_t    cls;
+extern client_static_t      cls;
 
-extern cmdbuf_t    cl_cmdbuf;
-extern char        cl_cmdbuf_text[MAX_STRING_CHARS];
+extern cmdbuf_t     cl_cmdbuf;
+extern char         cl_cmdbuf_text[MAX_STRING_CHARS];
 
 //=============================================================================
 
@@ -501,20 +544,28 @@ extern char        cl_cmdbuf_text[MAX_STRING_CHARS];
 #define NOEXP_GRENADE   1
 #define NOEXP_ROCKET    2
 
+#define DLHACK_ROCKET_COLOR         1
+#define DLHACK_SMALLER_EXPLOSION    2
+#define DLHACK_NO_MUZZLEFLASH       4
+
 //
 // cvars
 //
-extern cvar_t    *cl_gun;
-extern cvar_t    *cl_gunalpha;
-extern cvar_t    *cl_predict;
-extern cvar_t    *cl_footsteps;
-extern cvar_t    *cl_noskins;
-extern cvar_t    *cl_kickangles;
-extern cvar_t    *cl_rollhack;
-extern cvar_t    *cl_noglow;
-extern cvar_t    *cl_nolerp;
+extern cvar_t   *cl_gunalpha;
+extern cvar_t   *cl_gunscale;
+extern cvar_t   *cl_gun_x;
+extern cvar_t   *cl_gun_y;
+extern cvar_t   *cl_gun_z;
+extern cvar_t   *cl_predict;
+extern cvar_t   *cl_footsteps;
+extern cvar_t   *cl_noskins;
+extern cvar_t   *cl_kickangles;
+extern cvar_t   *cl_rollhack;
+extern cvar_t   *cl_noglow;
+extern cvar_t   *cl_nobob;
+extern cvar_t   *cl_nolerp;
 
-#ifdef _DEBUG
+#if USE_DEBUG
 #define SHOWNET(level, ...) \
     if (cl_shownet->integer > level) \
         Com_LPrintf(PRINT_DEVELOPER, __VA_ARGS__)
@@ -524,58 +575,81 @@ extern cvar_t    *cl_nolerp;
 #define SHOWMISS(...) \
     if (cl_showmiss->integer) \
         Com_LPrintf(PRINT_DEVELOPER, __VA_ARGS__)
-extern cvar_t    *cl_shownet;
-extern cvar_t    *cl_showmiss;
-extern cvar_t    *cl_showclamp;
+extern cvar_t   *cl_shownet;
+extern cvar_t   *cl_showmiss;
+extern cvar_t   *cl_showclamp;
 #else
 #define SHOWNET(...)
 #define SHOWCLAMP(...)
 #define SHOWMISS(...)
 #endif
 
-extern cvar_t    *cl_vwep;
+extern cvar_t   *cl_vwep;
 
-extern cvar_t    *cl_disable_particles;
-extern cvar_t    *cl_disable_explosions;
-extern cvar_t    *cl_explosion_sprites;
-extern cvar_t    *cl_explosion_frametime;
+extern cvar_t   *cl_disable_particles;
+extern cvar_t   *cl_disable_explosions;
+extern cvar_t   *cl_explosion_sprites;
+extern cvar_t   *cl_explosion_frametime;
+extern cvar_t   *cl_dlight_hacks;
 
-extern cvar_t    *cl_chat_notify;
-extern cvar_t    *cl_chat_sound;
-extern cvar_t    *cl_chat_filter;
+extern cvar_t   *cl_chat_notify;
+extern cvar_t   *cl_chat_sound;
+extern cvar_t   *cl_chat_filter;
 
-extern cvar_t    *cl_disconnectcmd;
-extern cvar_t    *cl_changemapcmd;
-extern cvar_t    *cl_beginmapcmd;
+extern cvar_t   *cl_disconnectcmd;
+extern cvar_t   *cl_changemapcmd;
+extern cvar_t   *cl_beginmapcmd;
 
-extern cvar_t    *cl_gibs;
+extern cvar_t   *cl_gibs;
 
 #define CL_PLAYER_MODEL_DISABLED     0
 #define CL_PLAYER_MODEL_ONLY_GUN     1
 #define CL_PLAYER_MODEL_FIRST_PERSON 2
 #define CL_PLAYER_MODEL_THIRD_PERSON 3
 
-extern cvar_t    *cl_player_model;
-extern cvar_t    *cl_thirdperson_angle;
-extern cvar_t    *cl_thirdperson_range;
+extern cvar_t   *cl_player_model;
+extern cvar_t   *cl_thirdperson_angle;
+extern cvar_t   *cl_thirdperson_range;
 
-extern cvar_t    *cl_async;
+extern cvar_t   *cl_async;
 
 //
 // userinfo
 //
-extern cvar_t    *info_password;
-extern cvar_t    *info_spectator;
-extern cvar_t    *info_name;
-extern cvar_t    *info_skin;
-extern cvar_t    *info_rate;
-extern cvar_t    *info_fov;
-extern cvar_t    *info_msg;
-extern cvar_t    *info_hand;
-extern cvar_t    *info_gender;
-extern cvar_t    *info_uf;
+extern cvar_t   *info_password;
+extern cvar_t   *info_spectator;
+extern cvar_t   *info_name;
+extern cvar_t   *info_skin;
+extern cvar_t   *info_rate;
+extern cvar_t   *info_fov;
+extern cvar_t   *info_msg;
+extern cvar_t   *info_hand;
+extern cvar_t   *info_gender;
+extern cvar_t   *info_uf;
+
+//
+// models.c
+//
+extern cvar_t    *cl_testmodel;
+extern cvar_t    *cl_testfps;
+extern cvar_t    *cl_testalpha;
+extern qhandle_t  cl_testmodel_handle;
+extern vec3_t     cl_testmodel_position;
 
 //=============================================================================
+
+static inline void CL_AdvanceValue(float *restrict val, float target, float speed)
+{
+    if (*val < target) {
+        *val += speed * cls.frametime;
+        if (*val > target)
+            *val = target;
+    } else if (*val > target) {
+        *val -= speed * cls.frametime;
+        if (*val < target)
+            *val = target;
+    }
+}
 
 //
 // main.c
@@ -588,16 +662,18 @@ void CL_UpdateRecordingSetting(void);
 void CL_Begin(void);
 void CL_CheckForResend(void);
 void CL_ClearState(void);
-void CL_RestartFilesystem(qboolean total);
-void CL_RestartRefresh(qboolean total);
+void CL_RestartFilesystem(bool total);
+void CL_RestartRefresh(bool total);
 void CL_ClientCommand(const char *string);
 void CL_SendRcon(const netadr_t *adr, const char *pass, const char *cmd);
 const char *CL_Server_g(const char *partial, int argnum, int state);
 void CL_CheckForPause(void);
 void CL_UpdateFrameTimes(void);
-qboolean CL_CheckForIgnore(const char *s);
+bool CL_CheckForIgnore(const char *s);
 void CL_WriteConfig(void);
+void CL_LoadFilterList(string_entry_t **list, const char *name, const char *comments, size_t maxlen);
 
+void cl_timeout_changed(cvar_t *self);
 
 //
 // precache.c
@@ -625,13 +701,13 @@ void CL_UpdateConfigstring(int index);
 //
 // download.c
 //
-qerror_t CL_QueueDownload(const char *path, dltype_t type);
-qboolean CL_IgnoreDownload(const char *path);
+int CL_QueueDownload(const char *path, dltype_t type);
+bool CL_IgnoreDownload(const char *path);
 void CL_FinishDownload(dlqueue_t *q);
 void CL_CleanupDownloads(void);
 void CL_LoadDownloadIgnores(void);
-void CL_HandleDownload(byte *data, int size, int percent, int compressed);
-qboolean CL_CheckDownloadExtension(const char *ext);
+void CL_HandleDownload(byte *data, int size, int percent, int decompressed_size);
+bool CL_CheckDownloadExtension(const char *ext);
 void CL_StartNextDownload(void);
 void CL_RequestNextDownload(void);
 void CL_ResetPrecacheCheck(void);
@@ -656,6 +732,9 @@ void CL_SendCmd(void);
 // parse.c
 //
 
+#define CL_ES_EXTENDED_MASK \
+    (MSG_ES_LONGSOLID | MSG_ES_UMASK | MSG_ES_BEAMORIGIN | MSG_ES_EXTENSIONS)
+
 typedef struct {
     int type;
     vec3_t pos1;
@@ -672,7 +751,7 @@ typedef struct {
 typedef struct {
     int entity;
     int weapon;
-    int silenced;
+    bool silenced;
 } mz_params_t;
 
 typedef struct {
@@ -691,47 +770,48 @@ extern mz_params_t      mz;
 extern snd_params_t     snd;
 
 void CL_ParseServerMessage(void);
-void CL_SeekDemoMessage(void);
+bool CL_SeekDemoMessage(void);
 
 
 //
 // entities.c
 //
+
+#define EF_TRAIL_MASK   (EF_ROCKET | EF_BLASTER | EF_HYPERBLASTER | EF_GIB | EF_GRENADE | \
+                         EF_FLIES | EF_BFG | EF_TRAP | EF_FLAG1 | EF_FLAG2 | EF_TAGTRAIL | \
+                         EF_TRACKERTRAIL | EF_TRACKER | EF_GREENGIB | EF_IONRIPPER | \
+                         EF_BLUEHYPERBLASTER | EF_PLASMA)
+
 void CL_DeltaFrame(void);
 void CL_AddEntities(void);
 void CL_CalcViewValues(void);
 
-#ifdef _DEBUG
+#if USE_DEBUG
 void CL_CheckEntityPresent(int entnum, const char *what);
 #endif
 
 // the sound code makes callbacks to the client for entitiy position
 // information, so entities can be dynamically re-spatialized
-void CL_GetEntitySoundOrigin(int ent, vec3_t org);
+void CL_GetEntitySoundOrigin(unsigned entnum, vec3_t org);
 
 
 //
 // view.c
 //
-extern    int       gun_frame;
-extern    qhandle_t gun_model;
+extern int          gun_frame;
+extern qhandle_t    gun_model;
 
 void V_Init(void);
 void V_Shutdown(void);
 void V_RenderView(void);
 void V_AddEntity(entity_t *ent);
 void V_AddParticle(particle_t *p);
-#if USE_DLIGHTS
-void V_AddLight(vec3_t org, float intensity, float r, float g, float b);
-void V_AddLightEx(vec3_t org, float intensity, float r, float g, float b, float radius);
-#else
-#define V_AddLight(org, intensity, r, g, b)
-#define V_AddLightEx(org, intensity, r, g, b, radius)
-#endif
-#if USE_LIGHTSTYLES
-void V_AddLightStyle(int style, vec4_t value);
-#endif
+void V_AddLight(const vec3_t org, float intensity, float r, float g, float b);
+void V_AddSphereLight(const vec3_t org, float intensity, float r, float g, float b, float radius);
+void V_AddSpotLight(const vec3_t org, const vec3_t dir, float intensity, float r, float g, float b, float width_angle, float falloff_angle);
+void V_AddLightStyle(int style, float value);
 void CL_UpdateBlendSetting(void);
+void V_Flashlight(const entity_t *ent, const centity_state_t *cent_state);
 
 
 //
@@ -743,7 +823,6 @@ typedef struct cl_sustain_s {
     int     type;
     int     endtime;
     int     nextthink;
-    int     thinkinterval;
     vec3_t  org;
     vec3_t  dir;
     int     color;
@@ -752,7 +831,9 @@ typedef struct cl_sustain_s {
     void    (*think)(struct cl_sustain_s *self);
 } cl_sustain_t;
 
-void CL_SmokeAndFlash(vec3_t origin);
+void CL_SmokeAndFlash(const vec3_t origin);
+void CL_DrawBeam(const vec3_t org, const vec3_t end, qhandle_t model);
+void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation);
 
 void CL_RegisterTEntSounds(void);
 void CL_RegisterTEntModels(void);
@@ -768,6 +849,7 @@ void CL_InitTEnts(void);
 void CL_PredictAngles(void);
 void CL_PredictMovement(void);
 void CL_CheckPredictionError(void);
+void CL_Trace(trace_t *tr, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, int contentmask);
 
 
 //
@@ -775,7 +857,7 @@ void CL_CheckPredictionError(void);
 //
 #define PARTICLE_GRAVITY        120
 #define BLASTER_PARTICLE_COLOR  0xe0
-#define INSTANT_PARTICLE    -10000.0
+#define INSTANT_PARTICLE    -10000.0f
 
 typedef struct cparticle_s {
     struct cparticle_s    *next;
@@ -792,91 +874,88 @@ typedef struct cparticle_s {
 	float   brightness;
 } cparticle_t;
 
-#if USE_DLIGHTS
 typedef struct cdlight_s {
     int     key;        // so entities can reuse same entry
+    int     born;       // cl.time when this light was created
     vec3_t  color;
     vec3_t  origin;
     float   radius;
     float   die;        // stop lighting after this time
     float   decay;      // drop this each second
 	vec3_t  velosity;     // move this far each second
-    //float   minlight;   // don't add when contributing less
 } cdlight_t;
-#endif
 
-void CL_BigTeleportParticles(vec3_t org);
-void CL_RocketTrail(vec3_t start, vec3_t end, centity_t *old);
-void CL_DiminishingTrail(vec3_t start, vec3_t end, centity_t *old, int flags);
-void CL_FlyEffect(centity_t *ent, vec3_t origin);
+typedef enum {
+    DT_GIB,
+    DT_GREENGIB,
+    DT_SMOKE,
+    DT_FIREBALL,
+
+    DT_COUNT
+} diminishing_trail_t;
+
+void CL_BigTeleportParticles(const vec3_t org);
+void CL_RocketTrail(const vec3_t start, const vec3_t end, centity_t *old);
+void CL_DiminishingTrail(const vec3_t start, const vec3_t end, centity_t *old, diminishing_trail_t type);
+void CL_FlyEffect(centity_t *ent, const vec3_t origin);
 void CL_BfgParticles(entity_t *ent);
-void CL_ItemRespawnParticles(vec3_t org);
+void CL_ItemRespawnParticles(const vec3_t org);
 void CL_InitEffects(void);
 void CL_ClearEffects(void);
-void CL_BlasterParticles(vec3_t org, vec3_t dir);
-void CL_ExplosionParticles(vec3_t org);
-void CL_BFGExplosionParticles(vec3_t org);
-void CL_BlasterTrail(vec3_t start, vec3_t end);
-void CL_QuadTrail(vec3_t start, vec3_t end);
+void CL_BlasterParticles(const vec3_t org, const vec3_t dir);
+void CL_ExplosionParticles(const vec3_t org);
+void CL_BFGExplosionParticles(const vec3_t org);
+void CL_BlasterTrail(const vec3_t start, const vec3_t end);
 void CL_OldRailTrail(void);
-void CL_BubbleTrail(vec3_t start, vec3_t end);
-void CL_FlagTrail(vec3_t start, vec3_t end, int color);
+void CL_BubbleTrail(const vec3_t start, const vec3_t end);
+void CL_FlagTrail(const vec3_t start, const vec3_t end, int color);
 void CL_MuzzleFlash(void);
 void CL_MuzzleFlash2(void);
-void CL_TeleporterParticles(vec3_t org);
-void CL_TeleportParticles(vec3_t org);
-void CL_ParticleEffect(vec3_t org, vec3_t dir, int color, int count);
-void CL_ParticleEffectWaterSplash(vec3_t org, vec3_t dir, int color, int count);
-void CL_BloodParticleEffect(vec3_t org, vec3_t dir, int color, int count);
-void CL_ParticleEffect2(vec3_t org, vec3_t dir, int color, int count);
+void CL_TeleporterParticles(const vec3_t org);
+void CL_TeleportParticles(const vec3_t org);
+void CL_ParticleEffect(const vec3_t org, const vec3_t dir, int color, int count);
+void CL_ParticleEffectWaterSplash(const vec3_t org, const vec3_t dir, int color, int count);
+void CL_BloodParticleEffect(const vec3_t org, const vec3_t dir, int color, int count);
+void CL_ParticleEffect2(const vec3_t org, const vec3_t dir, int color, int count);
 cparticle_t *CL_AllocParticle(void);
 void CL_RunParticles(void);
 void CL_AddParticles(void);
-#if USE_DLIGHTS
 cdlight_t *CL_AllocDlight(int key);
-void CL_RunDLights(void);
 void CL_AddDLights(void);
-#endif
-#if USE_LIGHTSTYLES
-void CL_ClearLightStyles(void);
 void CL_SetLightStyle(int index, const char *s);
-void CL_RunLightStyles(void);
 void CL_AddLightStyles(void);
-#endif
 
 //
 // newfx.c
 //
 
-void CL_BlasterParticles2(vec3_t org, vec3_t dir, unsigned int color);
-void CL_BlasterTrail2(vec3_t start, vec3_t end);
-void CL_DebugTrail(vec3_t start, vec3_t end);
-void CL_SmokeTrail(vec3_t start, vec3_t end, int colorStart, int colorRun, int spacing);
-#if USE_DLIGHTS
-void CL_Flashlight(int ent, vec3_t pos);
-#endif
-void CL_ForceWall(vec3_t start, vec3_t end, int color);
-void CL_GenericParticleEffect(vec3_t org, vec3_t dir, int color, int count, int numcolors, int dirspread, float alphavel);
-void CL_BubbleTrail2(vec3_t start, vec3_t end, int dist);
-void CL_Heatbeam(vec3_t start, vec3_t end);
-void CL_ParticleSteamEffect(vec3_t org, vec3_t dir, int color, int count, int magnitude);
-void CL_TrackerTrail(vec3_t start, vec3_t end, int particleColor);
-void CL_Tracker_Explode(vec3_t origin);
-void CL_TagTrail(vec3_t start, vec3_t end, int color);
-#if USE_DLIGHTS
-void CL_ColorFlash(vec3_t pos, int ent, int intensity, float r, float g, float b);
-#endif
-void CL_Tracker_Shell(vec3_t origin);
-void CL_MonsterPlasma_Shell(vec3_t origin);
-void CL_ColorExplosionParticles(vec3_t org, int color, int run);
-void CL_ParticleSmokeEffect(vec3_t org, vec3_t dir, int color, int count, int magnitude);
+void CL_BlasterParticles2(const vec3_t org, const vec3_t dir, unsigned int color);
+void CL_BlasterTrail2(const vec3_t start, const vec3_t end);
+void CL_DebugTrail(const vec3_t start, const vec3_t end);
+void CL_Flashlight(int ent, const vec3_t pos);
+void CL_ForceWall(const vec3_t start, const vec3_t end, int color);
+void CL_BubbleTrail2(const vec3_t start, const vec3_t end, int dist);
+void CL_Heatbeam(const vec3_t start, const vec3_t end);
+void CL_ParticleSteamEffect(const vec3_t org, const vec3_t dir, int color, int count, int magnitude);
+void CL_TrackerTrail(const vec3_t start, const vec3_t end, int particleColor);
+void CL_TagTrail(const vec3_t start, const vec3_t end, int color);
+void CL_ColorFlash(const vec3_t pos, int ent, int intensity, float r, float g, float b);
+void CL_Tracker_Shell(const centity_t *cent, const vec3_t origin);
+void CL_MonsterPlasma_Shell(const vec3_t origin);
+void CL_ColorExplosionParticles(const vec3_t org, int color, int run);
+void CL_ParticleSmokeEffect(const vec3_t org, const vec3_t dir, int color, int count, int magnitude);
 void CL_Widowbeamout(cl_sustain_t *self);
 void CL_Nukeblast(cl_sustain_t *self);
 void CL_WidowSplash(void);
-void CL_IonripperTrail(vec3_t start, vec3_t end);
-void CL_TrapParticles(entity_t *ent);
-void CL_ParticleEffect3(vec3_t org, vec3_t dir, int color, int count);
+void CL_IonripperTrail(const vec3_t start, const vec3_t end);
+void CL_TrapParticles(centity_t *ent, const vec3_t origin);
+void CL_ParticleEffect3(const vec3_t org, const vec3_t dir, int color, int count);
 void CL_ParticleSteamEffect2(cl_sustain_t *self);
+void CL_BerserkSlamParticles(const vec3_t org, const vec3_t dir);
+void CL_PowerSplash(void);
+void CL_TeleporterParticles2(const vec3_t org);
+void CL_HologramParticles(const vec3_t org);
+void CL_BarrelExplodingParticles(const vec3_t org);
 
 
 //
@@ -885,9 +964,10 @@ void CL_ParticleSteamEffect2(cl_sustain_t *self);
 void CL_InitDemos(void);
 void CL_CleanupDemos(void);
 void CL_DemoFrame(int msec);
-qboolean CL_WriteDemoMessage(sizebuf_t *buf);
+bool CL_WriteDemoMessage(sizebuf_t *buf);
 void CL_EmitDemoFrame(void);
 void CL_EmitDemoSnapshot(void);
+void CL_FreeDemoSnapshots(void);
 void CL_FirstDemoFrame(void);
 void CL_Stop_f(void);
 demoInfo_t *CL_GetDemoInfo(const char *path, demoInfo_t *info);
@@ -915,9 +995,9 @@ void Con_Print(const char *txt);
 void Con_ClearNotify_f(void);
 void Con_ToggleConsole_f(void);
 void Con_ClearTyping(void);
-void Con_Close(qboolean force);
-void Con_Popup(qboolean force);
-void Con_SkipNotify(qboolean skip);
+void Con_Close(bool force);
+void Con_Popup(bool force);
+void Con_SkipNotify(bool skip);
 void Con_RegisterMedia(void);
 void Con_CheckResize(void);
 
@@ -946,12 +1026,8 @@ void    SCR_UpdateScreen(void);
 void    SCR_SizeUp(void);
 void    SCR_SizeDown(void);
 void    SCR_CenterPrint(const char *str);
-void    SCR_FinishCinematic(void);
-void    SCR_PlayCinematic(const char *name);
-void    SCR_RunCinematic();
 void    SCR_BeginLoadingPlaque(void);
 void    SCR_EndLoadingPlaque(void);
-void    SCR_DebugGraph(float value, int color);
 void    SCR_TouchPics(void);
 void    SCR_RegisterMedia(void);
 void    SCR_ModeChanged(void);
@@ -968,10 +1044,15 @@ void    SCR_DrawStringMulti(int x, int y, int flags, size_t maxlen, const char *
 void    SCR_ClearChatHUD_f(void);
 void    SCR_AddToChatHUD(const char *text);
 
-#ifdef _DEBUG
-void CL_AddNetgraph(void);
-#endif
-
+//
+// cin.c
+//
+void    SCR_StopCinematic(void);
+void    SCR_FinishCinematic(void);
+void    SCR_RunCinematic(void);
+void    SCR_DrawCinematic(void);
+void    SCR_ReloadCinematic(void);
+void    SCR_PlayCinematic(const char *name);
 
 //
 // ascii.c
@@ -986,14 +1067,14 @@ void CL_InitAscii(void);
 void HTTP_Init(void);
 void HTTP_Shutdown(void);
 void HTTP_SetServer(const char *url);
-qerror_t HTTP_QueueDownload(const char *path, dltype_t type);
+int HTTP_QueueDownload(const char *path, dltype_t type);
 void HTTP_RunDownloads(void);
 void HTTP_CleanupDownloads(void);
 #else
 #define HTTP_Init()                     (void)0
 #define HTTP_Shutdown()                 (void)0
 #define HTTP_SetServer(url)             (void)0
-#define HTTP_QueueDownload(path, type)  Q_ERR_NOSYS
+#define HTTP_QueueDownload(path, type)  Q_ERR(ENOSYS)
 #define HTTP_RunDownloads()             (void)0
 #define HTTP_CleanupDownloads()         (void)0
 #endif
@@ -1031,6 +1112,3 @@ byte COM_BlockSequenceCRCByte(byte *base, size_t length, int sequence);
 // effects.c
 //
 void FX_Init(void);
-
-// RTX development feature that loads and spawns a set of material sample balls
-#define CL_RTX_SHADERBALLS 1

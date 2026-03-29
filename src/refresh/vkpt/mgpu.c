@@ -53,14 +53,6 @@ vkpt_mgpu_image_copy(VkCommandBuffer cmd_buf,
 					VkOffset2D dst_offset,
 					VkExtent2D size)
 {
-	VkImageSubresourceRange subresource_range = {
-		.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-		.baseMipLevel   = 0,
-		.levelCount     = 1,
-		.baseArrayLayer = 0,
-		.layerCount     = 1
-	};
-
 	VkImageSubresourceLayers subresource_layers = {
 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 		.mipLevel = 0,
@@ -99,8 +91,8 @@ vkpt_mgpu_image_copy(VkCommandBuffer cmd_buf,
 				0, NULL);
 
 	vkCmdCopyImage(cmd_buf,
-		qvk.images_local[src_gpu_index][src_image_index], VK_IMAGE_LAYOUT_GENERAL,
-		qvk.images_local[dst_gpu_index][dst_image_index], VK_IMAGE_LAYOUT_GENERAL,
+		qvk.images_local[src_image_index][src_gpu_index], VK_IMAGE_LAYOUT_GENERAL,
+		qvk.images_local[dst_image_index][dst_gpu_index], VK_IMAGE_LAYOUT_GENERAL,
 		1, &copy_region);
 
 	set_current_gpu(cmd_buf, ALL_GPUS);
@@ -115,14 +107,6 @@ vkpt_image_copy(VkCommandBuffer cmd_buf,
 	VkOffset2D dst_offset,
 	VkExtent2D size)
 {
-	VkImageSubresourceRange subresource_range = {
-		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.baseMipLevel = 0,
-		.levelCount = 1,
-		.baseArrayLayer = 0,
-		.layerCount = 1
-	};
-
 	VkImageSubresourceLayers subresource_layers = {
 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 		.mipLevel = 0,

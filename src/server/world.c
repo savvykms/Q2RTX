@@ -42,10 +42,10 @@ typedef struct areanode_s {
 static areanode_t   sv_areanodes[AREA_NODES];
 static int          sv_numareanodes;
 
-static float    *area_mins, *area_maxs;
-static edict_t  **area_list;
-static int      area_count, area_maxcount;
-static int      area_type;
+static const vec_t  *area_mins, *area_maxs;
+static edict_t      **area_list;
+static int          area_count, area_maxcount;
+static int          area_type;
 
 /*
 ===============
@@ -54,7 +54,7 @@ SV_CreateAreaNode
 Builds a uniformly subdivided tree for the given world size
 ===============
 */
-static areanode_t *SV_CreateAreaNode(int depth, vec3_t mins, vec3_t maxs)
+static areanode_t *SV_CreateAreaNode(int depth, const vec3_t mins, const vec3_t maxs)
 {
     areanode_t  *anode;
     vec3_t      size;
@@ -78,7 +78,7 @@ static areanode_t *SV_CreateAreaNode(int depth, vec3_t mins, vec3_t maxs)
     else
         anode->axis = 1;
 
-    anode->dist = 0.5 * (maxs[anode->axis] + mins[anode->axis]);
+    anode->dist = 0.5f * (maxs[anode->axis] + mins[anode->axis]);
     VectorCopy(mins, mins1);
     VectorCopy(mins, mins2);
     VectorCopy(maxs, maxs1);
@@ -121,32 +121,6 @@ void SV_ClearWorld(void)
 
 /*
 ===============
-SV_EdictIsVisible
-
-Checks if edict is potentially visible from the given PVS row.
-===============
-*/
-qboolean SV_EdictIsVisible(cm_t *cm, edict_t *ent, byte *mask)
-{
-    int i;
-
-    if (ent->num_clusters == -1) {
-        // too many leafs for individual check, go by headnode
-        return CM_HeadnodeVisible(CM_NodeNum(cm, ent->headnode), mask);
-    }
-
-    // check individual leafs
-    for (i = 0; i < ent->num_clusters; i++) {
-        if (Q_IsBitSet(mask, ent->clusternums[i])) {
-            return qtrue;
-        }
-    }
-
-    return qfalse;  // not visible
-}
-
-/*
-===============
 SV_LinkEdict
 
 General purpose routine shared between game DLL and MVD code.
@@ -166,18 +140,16 @@ void SV_LinkEdict(cm_t *cm, edict_t *ent)
     VectorSubtract(ent->maxs, ent->mins, ent->size);
 
     // set the abs box
-    if (ent->solid == SOLID_BSP &&
-        (ent->s.angles[0] || ent->s.angles[1] || ent->s.angles[2])) {
+    if (ent->solid == SOLID_BSP && !VectorEmpty(ent->s.angles)) {
         // expand for rotation
         float   max, v;
-        int     i;
 
         max = 0;
         for (i = 0; i < 3; i++) {
-            v = Q_fabs(ent->mins[i]);
+            v = fabsf(ent->mins[i]);
             if (v > max)
                 max = v;
-            v = Q_fabs(ent->maxs[i]);
+            v = fabsf(ent->maxs[i]);
             if (v > max)
                 max = v;
         }
@@ -211,15 +183,14 @@ void SV_LinkEdict(cm_t *cm, edict_t *ent)
 
     // set areas
     for (i = 0; i < num_leafs; i++) {
-        clusters[i] = CM_LeafCluster(leafs[i]);
-        area = CM_LeafArea(leafs[i]);
+        clusters[i] = leafs[i]->cluster;
+        area = leafs[i]->area;
         if (area) {
             // doors may legally straggle two areas,
             // but nothing should evern need more than that
             if (ent->areanum && ent->areanum != area) {
                 if (ent->areanum2 && ent->areanum2 != area && sv.state == ss_loading) {
-                    Com_DPrintf("Object touching 3 areas at %f %f %f\n",
-                                ent->absmin[0], ent->absmin[1], ent->absmin[2]);
+                    Com_DPrintf("Object touching 3 areas at %s\n", vtos(ent->absmin));
                 }
                 ent->areanum2 = area;
             } else
@@ -255,10 +226,42 @@ void SV_LinkEdict(cm_t *cm, edict_t *ent)
 
 void PF_UnlinkEdict(edict_t *ent)
 {
+    if (!ent)
+        Com_Error(ERR_DROP, "%s: NULL", __func__);
     if (!ent->area.prev)
         return;        // not linked in anywhere
     List_Remove(&ent->area);
     ent->area.prev = ent->area.next = NULL;
+}
+
+static uint32_t SV_PackSolid32(edict_t *ent)
+{
+    uint32_t solid32;
+
+    if (svs.csr.extended)
+        solid32 = MSG_PackSolid32_Ver2(ent->mins, ent->maxs);
+    else
+        solid32 = MSG_PackSolid32_Ver1(ent->mins, ent->maxs);
+
+    if (solid32 == PACKED_BSP)
+        solid32 = 0;  // can happen in pathological case if z mins > maxs
+
+#if USE_DEBUG
+    if (developer->integer) {
+        vec3_t mins, maxs;
+
+        if (svs.csr.extended)
+            MSG_UnpackSolid32_Ver2(solid32, mins, maxs);
+        else
+            MSG_UnpackSolid32_Ver1(solid32, mins, maxs);
+
+        if (!VectorCompare(ent->mins, mins) || !VectorCompare(ent->maxs, maxs))
+            Com_LPrintf(PRINT_DEVELOPER, "Bad mins/maxs on entity %d: %s %s\n",
+                        NUM_FOR_EDICT(ent), vtos(ent->mins), vtos(ent->maxs));
+    }
+#endif
+
+    return solid32;
 }
 
 void PF_LinkEdict(edict_t *ent)
@@ -269,6 +272,9 @@ void PF_LinkEdict(edict_t *ent)
 #if USE_FPS
     int i;
 #endif
+
+    if (!ent)
+        Com_Error(ERR_DROP, "%s: NULL", __func__);
 
     if (ent->area.prev)
         PF_UnlinkEdict(ent);     // unlink from old position
@@ -296,7 +302,7 @@ void PF_LinkEdict(edict_t *ent)
             sent->solid32 = 0;
         } else {
             ent->s.solid = MSG_PackSolid16(ent->mins, ent->maxs);
-            sent->solid32 = MSG_PackSolid32(ent->mins, ent->maxs);
+            sent->solid32 = SV_PackSolid32(ent);
         }
         break;
     case SOLID_BSP:
@@ -313,7 +319,8 @@ void PF_LinkEdict(edict_t *ent)
 
     // if first time, make sure old_origin is valid
     if (!ent->linkcount) {
-        VectorCopy(ent->s.origin, ent->s.old_origin);
+        if (!(ent->s.renderfx & RF_BEAM))
+            VectorCopy(ent->s.origin, ent->s.old_origin);
 #if USE_FPS
         VectorCopy(ent->s.origin, sent->create_origin);
         sent->create_framenum = sv.framenum;
@@ -404,8 +411,8 @@ static void SV_AreaEdicts_r(areanode_t *node)
 SV_AreaEdicts
 ================
 */
-int SV_AreaEdicts(vec3_t mins, vec3_t maxs, edict_t **list,
-                  int maxcount, int areatype)
+int SV_AreaEdicts(const vec3_t mins, const vec3_t maxs,
+                  edict_t **list, int maxcount, int areatype)
 {
     area_mins = mins;
     area_maxs = maxs;
@@ -451,7 +458,7 @@ static mnode_t *SV_HullForEntity(edict_t *ent)
 SV_PointContents
 =============
 */
-int SV_PointContents(vec3_t p)
+int SV_PointContents(const vec3_t p)
 {
     edict_t     *touch[MAX_EDICTS], *hit;
     int         i, num;
@@ -484,7 +491,8 @@ SV_ClipMoveToEntities
 
 ====================
 */
-static void SV_ClipMoveToEntities(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end,
+static void SV_ClipMoveToEntities(const vec3_t start, const vec3_t mins,
+                                  const vec3_t maxs, const vec3_t end,
                                   edict_t *passedict, int contentmask, trace_t *tr)
 {
     vec3_t      boxmins, boxmaxs;
@@ -543,24 +551,14 @@ Moves the given mins/maxs volume through the world from start to end.
 Passedict and edicts owned by passedict are explicitly not checked.
 ==================
 */
-trace_t q_gameabi SV_Trace(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end,
+trace_t q_gameabi SV_Trace(const vec3_t start, const vec3_t mins,
+                           const vec3_t maxs, const vec3_t end,
                            edict_t *passedict, int contentmask)
 {
     trace_t     trace;
 
     if (!sv.cm.cache) {
         Com_Error(ERR_DROP, "%s: no map loaded", __func__);
-    }
-
-    // work around game bugs
-    if (++sv.tracecount > 10000) {
-        Com_EPrintf("%s: runaway loop avoided\n", __func__);
-        memset(&trace, 0, sizeof(trace));
-        trace.fraction = 1;
-        trace.ent = ge->edicts;
-        VectorCopy(end, trace.endpos);
-        sv.tracecount = 0;
-        return trace;
     }
 
     if (!mins)

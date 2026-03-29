@@ -17,7 +17,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "client.h"
-#include "common/x86/fpu.h"
 
 /*
 ===================
@@ -31,7 +30,7 @@ void CL_CheckPredictionError(void)
     unsigned    cmd;
     int         len;
 
-    if (!cls.netchan) {
+    if (cls.demo.playback) {
         return;
     }
 
@@ -44,7 +43,7 @@ void CL_CheckPredictionError(void)
         return;
 
     // calculate the last usercmd_t we sent that the server has processed
-    frame = cls.netchan->incoming_acknowledged & CMD_MASK;
+    frame = cls.netchan.incoming_acknowledged & CMD_MASK;
     cmd = cl.history[frame].cmdNumber;
 
     // compare what the server returned with what we had predicted it to be
@@ -74,10 +73,9 @@ void CL_CheckPredictionError(void)
 /*
 ====================
 CL_ClipMoveToEntities
-
 ====================
 */
-static void CL_ClipMoveToEntities(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end, trace_t *tr)
+static void CL_ClipMoveToEntities(trace_t *tr, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, int contentmask)
 {
     int         i;
     trace_t     trace;
@@ -102,35 +100,37 @@ static void CL_ClipMoveToEntities(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t
             return;
 
         CM_TransformedBoxTrace(&trace, start, end,
-                               mins, maxs, headnode,  MASK_PLAYERSOLID,
+                               mins, maxs, headnode, contentmask,
                                ent->current.origin, ent->current.angles);
 
         CM_ClipEntity(tr, &trace, (struct edict_s *)ent);
     }
 }
 
-
 /*
 ================
-CL_PMTrace
+CL_Trace
 ================
 */
-static trace_t q_gameabi CL_Trace(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end)
+void CL_Trace(trace_t *tr, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, int contentmask)
 {
-    trace_t    t;
-
     // check against world
-    CM_BoxTrace(&t, start, end, mins, maxs, cl.bsp->nodes, MASK_PLAYERSOLID);
-    if (t.fraction < 1.0)
-        t.ent = (struct edict_s *)1;
+    CM_BoxTrace(tr, start, end, mins, maxs, cl.bsp->nodes, contentmask);
+    if (tr->fraction < 1.0f)
+        tr->ent = (struct edict_s *)cl_entities;
 
     // check all other solid models
-    CL_ClipMoveToEntities(start, mins, maxs, end, &t);
+    CL_ClipMoveToEntities(tr, start, mins, maxs, end, contentmask);
+}
 
+static trace_t q_gameabi CL_PMTrace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end)
+{
+    trace_t t;
+    CL_Trace(&t, start, mins, maxs, end, MASK_PLAYERSOLID);
     return t;
 }
 
-static int CL_PointContents(vec3_t point)
+static int CL_PointContents(const vec3_t point)
 {
     int         i;
     centity_t   *ent;
@@ -196,7 +196,7 @@ void CL_PredictMovement(void)
         return;
     }
 
-    ack = cl.history[cls.netchan->incoming_acknowledged & CMD_MASK].cmdNumber;
+    ack = cl.history[cls.netchan.incoming_acknowledged & CMD_MASK].cmdNumber;
     current = cl.cmdNumber;
 
     // if we are too far out of date, just freeze
@@ -210,18 +210,11 @@ void CL_PredictMovement(void)
         return;
     }
 
-    X86_PUSH_FPCW;
-    X86_SINGLE_FPCW;
-
     // copy current state to pmove
     memset(&pm, 0, sizeof(pm));
-    pm.trace = CL_Trace;
+    pm.trace = CL_PMTrace;
     pm.pointcontents = CL_PointContents;
-
     pm.s = cl.frame.ps.pmove;
-#if USE_SMOOTH_DELTA_ANGLES
-    VectorCopy(cl.delta_angles, pm.s.delta_angles);
-#endif
 
     // run frames
     while (++ack <= current) {
@@ -246,8 +239,6 @@ void CL_PredictMovement(void)
     } else {
         frame = current - 1;
     }
-
-    X86_POP_FPCW;
 
     if (pm.s.pm_type != PM_SPECTATOR && (pm.s.pm_flags & PMF_ON_GROUND)) {
         oldz = cl.predicted_origins[cl.predicted_step_frame & CMD_MASK][2];

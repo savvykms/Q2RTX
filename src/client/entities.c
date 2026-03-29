@@ -24,7 +24,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 extern qhandle_t cl_mod_powerscreen;
 extern qhandle_t cl_mod_laser;
 extern qhandle_t cl_mod_dmspot;
-extern qhandle_t cl_sfx_footsteps[4];
 
 /*
 =========================================================================
@@ -34,26 +33,21 @@ FRAME PARSING
 =========================================================================
 */
 
-static inline qboolean entity_optimized(const entity_state_t *state)
+// returns true if origin/angles update has been optimized out
+static inline bool entity_is_optimized(const centity_state_t *state)
 {
-    if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO)
-        return qfalse;
-
-    if (state->number != cl.frame.clientNum + 1)
-        return qfalse;
-
-    if (cl.frame.ps.pmove.pm_type >= PM_DEAD)
-        return qfalse;
-
-    return qtrue;
+    return cls.serverProtocol == PROTOCOL_VERSION_Q2PRO
+        && state->number == cl.frame.clientNum + 1
+        && cl.frame.ps.pmove.pm_type < PM_DEAD;
 }
 
 static inline void
-entity_update_new(centity_t *ent, const entity_state_t *state, const vec_t *origin)
+entity_update_new(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
     static int entity_ctr;
     ent->id = ++entity_ctr;
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
+    ent->flashlightfrac = 1.0f;
 
     // duplicate the current state so lerping doesn't hurt anything
     ent->prev = *state;
@@ -64,7 +58,7 @@ entity_update_new(centity_t *ent, const entity_state_t *state, const vec_t *orig
 
     if (state->event == EV_PLAYER_TELEPORT ||
         state->event == EV_OTHER_TELEPORT ||
-        (state->renderfx & (RF_FRAMELERP | RF_BEAM))) {
+        (state->renderfx & RF_BEAM)) {
         // no lerping if teleported
         VectorCopy(origin, ent->lerp_origin);
         return;
@@ -77,7 +71,7 @@ entity_update_new(centity_t *ent, const entity_state_t *state, const vec_t *orig
 }
 
 static inline void
-entity_update_old(centity_t *ent, const entity_state_t *state, const vec_t *origin)
+entity_update_old(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
     int event = state->event;
 
@@ -103,6 +97,7 @@ entity_update_old(centity_t *ent, const entity_state_t *state, const vec_t *orig
         || cl_nolerp->integer == 1) {
         // some data changes will force no lerping
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
+        ent->flashlightfrac = 1.0f;
 
         // duplicate the current state so lerping doesn't hurt anything
         ent->prev = *state;
@@ -119,10 +114,6 @@ entity_update_old(centity_t *ent, const entity_state_t *state, const vec_t *orig
     if (state->frame != ent->current.frame) {
         ent->prev_frame = ent->current.frame;
         ent->anim_start = cl.servertime - cl.frametime;
-        Com_DDPrintf("[%d] anim start %d: %d --> %d [%d]\n",
-                     ent->anim_start, state->number,
-                     ent->prev_frame, state->frame,
-                     cl.frame.number);
     }
 #endif
 
@@ -130,27 +121,27 @@ entity_update_old(centity_t *ent, const entity_state_t *state, const vec_t *orig
     ent->prev = ent->current;
 }
 
-static inline qboolean entity_new(const centity_t *ent)
+static inline bool entity_is_new(const centity_t *ent)
 {
     if (!cl.oldframe.valid)
-        return qtrue;   // last received frame was invalid
+        return true;    // last received frame was invalid
 
     if (ent->serverframe != cl.oldframe.number)
-        return qtrue;   // wasn't in last received frame
+        return true;    // wasn't in last received frame
 
     if (cl_nolerp->integer == 2)
-        return qtrue;   // developer option, always new
+        return true;    // developer option, always new
 
     if (cl_nolerp->integer == 3)
-        return qfalse;  // developer option, lerp from last received frame
+        return false;   // developer option, lerp from last received frame
 
     if (cl.oldframe.number != cl.frame.number - 1)
-        return qtrue;   // previous server frame was dropped
+        return true;    // previous server frame was dropped
 
-    return qfalse;
+    return false;
 }
 
-static void entity_update(const entity_state_t *state)
+static void parse_entity_update(const centity_state_t *state)
 {
     centity_t *ent = &cl_entities[state->number];
     const vec_t *origin;
@@ -158,27 +149,33 @@ static void entity_update(const entity_state_t *state)
 
     // if entity is solid, decode mins/maxs and add to the list
     if (state->solid && state->number != cl.frame.clientNum + 1
-        && cl.numSolidEntities < MAX_PACKET_ENTITIES) {
+        && cl.numSolidEntities < MAX_PACKET_ENTITIES)
         cl.solidEntities[cl.numSolidEntities++] = ent;
-        if (state->solid != PACKED_BSP) {
-            // encoded bbox
-            if (cl.esFlags & MSG_ES_LONGSOLID) {
-                MSG_UnpackSolid32(state->solid, ent->mins, ent->maxs);
-            } else {
-                MSG_UnpackSolid16(state->solid, ent->mins, ent->maxs);
-            }
-        }
+
+    if (state->solid && state->solid != PACKED_BSP) {
+        // encoded bbox
+        if (cl.csr.extended)
+            MSG_UnpackSolid32_Ver2(state->solid, ent->mins, ent->maxs);
+        else if (cl.esFlags & MSG_ES_LONGSOLID)
+            MSG_UnpackSolid32_Ver1(state->solid, ent->mins, ent->maxs);
+        else
+            MSG_UnpackSolid16(state->solid, ent->mins, ent->maxs);
+        ent->radius = Distance(ent->maxs, ent->mins) * 0.5f;
+    } else {
+        VectorClear(ent->mins);
+        VectorClear(ent->maxs);
+        ent->radius = 0;
     }
 
     // work around Q2PRO server bandwidth optimization
-    if (entity_optimized(state)) {
+    if (entity_is_optimized(state)) {
         VectorScale(cl.frame.ps.pmove.origin, 0.125f, origin_v);
         origin = origin_v;
     } else {
         origin = state->origin;
     }
 
-    if (entity_new(ent)) {
+    if (entity_is_new(ent)) {
         // wasn't in last update, so initialize some things
         entity_update_new(ent, state, origin);
     } else {
@@ -189,19 +186,26 @@ static void entity_update(const entity_state_t *state)
     ent->current = *state;
 
     // work around Q2PRO server bandwidth optimization
-    if (entity_optimized(state)) {
-        Com_PlayerToEntityState(&cl.frame.ps, &ent->current);
+    if (entity_is_optimized(state)) {
+        Com_PlayerToEntityState(&cl.frame.ps, &ent->current.s);
     }
 }
 
 // an entity has just been parsed that has an event value
-static void entity_event(int number)
+static void parse_entity_event(int number)
 {
     centity_t *cent = &cl_entities[number];
 
-    // EF_TELEPORTER acts like an event, but is not cleared each frame
-    if ((cent->current.effects & EF_TELEPORTER) && CL_FRAMESYNC) {
-        CL_TeleporterParticles(cent->current.origin);
+    if (CL_FRAMESYNC) {
+        // EF_TELEPORTER acts like an event, but is not cleared each frame
+        if (cent->current.effects & EF_TELEPORTER)
+            CL_TeleporterParticles(cent->current.origin);
+
+        if (cent->current.morefx & EFX_TELEPORTER2)
+            CL_TeleporterParticles2(cent->current.origin);
+
+        if (cent->current.morefx & EFX_BARREL_EXPLODING)
+            CL_BarrelExplodingParticles(cent->current.origin);
     }
 
 #if USE_FPS
@@ -220,7 +224,15 @@ static void entity_event(int number)
         break;
     case EV_FOOTSTEP:
         if (cl_footsteps->integer)
-            S_StartSound(NULL, number, CHAN_BODY, cl_sfx_footsteps[rand() & 3], 1, ATTN_NORM, 0);
+            CL_PlayFootstepSfx(-1, number, 1.0f, ATTN_NORM);
+        break;
+    case EV_OTHER_FOOTSTEP:
+        if (cl.csr.extended && cl_footsteps->integer)
+            CL_PlayFootstepSfx(-1, number, 0.5f, ATTN_IDLE);
+        break;
+    case EV_LADDER_STEP:
+        if (cl.csr.extended && cl_footsteps->integer)
+            CL_PlayFootstepSfx(FOOTSTEP_ID_LADDER, number, 0.5f, ATTN_IDLE);
         break;
     case EV_FALLSHORT:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("player/land1.wav"), 1, ATTN_NORM, 0);
@@ -246,18 +258,15 @@ static void set_active_state(void)
 #endif
 
     // initialize oldframe so lerping doesn't hurt anything
-    cl.oldframe.valid = qfalse;
+    cl.oldframe.valid = false;
     cl.oldframe.ps = cl.frame.ps;
 #if USE_FPS
-    cl.oldkeyframe.valid = qfalse;
+    cl.oldkeyframe.valid = false;
     cl.oldkeyframe.ps = cl.keyframe.ps;
 #endif
 
     cl.frameflags = 0;
-
-    if (cls.netchan) {
-        cl.initialSeq = cls.netchan->outgoing_sequence;
-    }
+    cl.initialSeq = cls.netchan.outgoing_sequence;
 
     if (cls.demo.playback) {
         // init some demo things
@@ -278,7 +287,7 @@ static void set_active_state(void)
 
     SCR_EndLoadingPlaque();     // get rid of loading plaque
     SCR_LagClear();
-    Con_Close(qfalse);          // get rid of connection screen
+    Con_Close(false);           // get rid of connection screen
 
     CL_CheckForPause();
 
@@ -291,7 +300,7 @@ static void set_active_state(void)
 }
 
 static void
-player_update(server_frame_t *oldframe, server_frame_t *frame, int framediv)
+check_player_lerp(server_frame_t *oldframe, server_frame_t *frame, int framediv)
 {
     player_state_t *ps, *ops;
     centity_t *ent;
@@ -358,7 +367,6 @@ A valid frame has been parsed.
 void CL_DeltaFrame(void)
 {
     centity_t           *ent;
-    entity_state_t      *state;
     int                 i, j;
     int                 framenum;
     int                 prevstate = cls.state;
@@ -381,17 +389,18 @@ void CL_DeltaFrame(void)
     // this is needed in situations when player entity is invisible, but
     // server sends an effect referencing it's origin (such as MZ_LOGIN, etc)
     ent = &cl_entities[cl.frame.clientNum + 1];
-    Com_PlayerToEntityState(&cl.frame.ps, &ent->current);
+    Com_PlayerToEntityState(&cl.frame.ps, &ent->current.s);
 
+    // set current and prev, unpack solid, etc
     for (i = 0; i < cl.frame.numEntities; i++) {
         j = (cl.frame.firstEntity + i) & PARSE_ENTITIES_MASK;
-        state = &cl.entityStates[j];
+        parse_entity_update(&cl.entityStates[j]);
+    }
 
-        // set current and prev
-        entity_update(state);
-
-        // fire events
-        entity_event(state->number);
+    // fire events. due to footstep tracing this must be after updating entities.
+    for (i = 0; i < cl.frame.numEntities; i++) {
+        j = (cl.frame.firstEntity + i) & PARSE_ENTITIES_MASK;
+        parse_entity_event(cl.entityStates[j].number);
     }
 
     if (cls.demo.recording && !cls.demo.paused && !cls.demo.seeking && CL_FRAMESYNC) {
@@ -413,11 +422,11 @@ void CL_DeltaFrame(void)
         IN_Activate();
     }
 
-    player_update(&cl.oldframe, &cl.frame, 1);
+    check_player_lerp(&cl.oldframe, &cl.frame, 1);
 
 #if USE_FPS
     if (CL_FRAMESYNC)
-        player_update(&cl.oldkeyframe, &cl.keyframe, cl.framediv);
+        check_player_lerp(&cl.oldkeyframe, &cl.keyframe, cl.framediv);
 #endif
 
     CL_CheckPredictionError();
@@ -425,7 +434,7 @@ void CL_DeltaFrame(void)
     SCR_SetCrosshairColor();
 }
 
-#ifdef _DEBUG
+#if USE_DEBUG
 // for debugging problems when out-of-date entity origin is referenced
 void CL_CheckEntityPresent(int entnum, const char *what)
 {
@@ -464,7 +473,7 @@ INTERPOLATE BETWEEN FRAMES TO GET RENDERING PARMS
 // Use a static entity ID on some things because the renderer relies on eid to match between meshes
 // on the current and previous frames.
 #define RESERVED_ENTITIY_GUN 1
-#define RESERVED_ENTITIY_SHADERBALLS 2
+#define RESERVED_ENTITIY_TESTMODEL 2
 #define RESERVED_ENTITIY_COUNT 3
 
 static int adjust_shell_fx(int renderfx)
@@ -511,8 +520,8 @@ CL_AddPacketEntities
 static void CL_AddPacketEntities(void)
 {
     entity_t            ent;
-    entity_state_t      *s1;
-    float               autorotate;
+    centity_state_t     *s1;
+    float               autorotate, autobob;
     int                 i;
     int                 pnum;
     centity_t           *cent;
@@ -525,6 +534,8 @@ static void CL_AddPacketEntities(void)
 
     // brush models can auto animate their frames
     autoanim = 2 * cl.time / 1000;
+
+    autobob = 5 * sin(cl.time / 400.0f);
 
     memset(&ent, 0, sizeof(ent));
 
@@ -575,19 +586,19 @@ static void CL_AddPacketEntities(void)
             renderfx |= RF_SHELL_HALF_DAM;
         }
 
+        if (s1->morefx & EFX_DUALFIRE) {
+            effects |= EF_COLOR_SHELL;
+            renderfx |= RF_SHELL_LITE_GREEN;
+        }
+
         // optionally remove the glowing effect
-        if (cl_noglow->integer)
+        if (cl_noglow->integer && !(renderfx & RF_BEAM))
             renderfx &= ~RF_GLOW;
 
         ent.oldframe = cent->prev.frame;
-        ent.backlerp = 1.0 - cl.lerpfrac;
+        ent.backlerp = 1.0f - cl.lerpfrac;
 
-        if (renderfx & RF_FRAMELERP) {
-            // step origin discretely, because the frames
-            // do the animation properly
-            VectorCopy(cent->current.origin, ent.origin);
-            VectorCopy(cent->current.old_origin, ent.oldorigin);  // FIXME
-        } else if (renderfx & RF_BEAM) {
+        if (renderfx & RF_BEAM) {
             // interpolate start and end points for beams
             LerpVector(cent->prev.origin, cent->current.origin,
                        cl.lerpfrac, ent.origin);
@@ -604,7 +615,6 @@ static void CL_AddPacketEntities(void)
                            cl.lerpfrac, ent.origin);
                 VectorCopy(ent.origin, ent.oldorigin);
             }
-
 #if USE_FPS
             // run alias model animation
             if (cent->prev_frame != s1->frame) {
@@ -612,42 +622,62 @@ static void CL_AddPacketEntities(void)
                 float frac;
 
                 if (delta > BASE_FRAMETIME) {
-                    Com_DDPrintf("[%d] anim end %d: %d --> %d\n",
-                                 cl.time, s1->number,
-                                 cent->prev_frame, s1->frame);
                     cent->prev_frame = s1->frame;
                     frac = 1;
                 } else if (delta > 0) {
                     frac = delta * BASE_1_FRAMETIME;
-                    Com_DDPrintf("[%d] anim run %d: %d --> %d [%f]\n",
-                                 cl.time, s1->number,
-                                 cent->prev_frame, s1->frame,
-                                 frac);
                 } else {
                     frac = 0;
                 }
 
                 ent.oldframe = cent->prev_frame;
-                ent.backlerp = 1.0 - frac;
+                ent.backlerp = 1.0f - frac;
             }
 #endif
         }
 
-        if ((effects & EF_GIB) && !cl_gibs->integer) {
-            goto skip;
+        if (effects & EF_BOB && !cl_nobob->integer) {
+            ent.origin[2] += autobob;
+            ent.oldorigin[2] += autobob;
         }
 
+        if ((effects & EF_GIB) && !cl_gibs->integer)
+            goto skip;
+
         // create a new entity
+
+        if (cl.csr.extended) {
+            if (renderfx & RF_FLARE)
+                goto skip;
+
+            if (renderfx & RF_CUSTOM_LIGHT) {
+                color_t color;
+                if (!s1->skinnum)
+                    color.u32 = U32_WHITE;
+                else
+                    color.u32 = BigLong(s1->skinnum);
+                V_AddLight(ent.origin, DLIGHT_CUTOFF + s1->frame,
+                           color.u8[0] / 255.0f,
+                           color.u8[1] / 255.0f,
+                           color.u8[2] / 255.0f);
+                goto skip;
+            }
+
+            if (renderfx & RF_BEAM && s1->modelindex > 1) {
+                CL_DrawBeam(ent.oldorigin, ent.origin, cl.model_draw[s1->modelindex]);
+                goto skip;
+            }
+        }
 
         // tweak the color of beams
         if (renderfx & RF_BEAM) {
             // the four beam colors are encoded in 32 bits of skinnum (hack)
-            ent.alpha = 0.30;
-            ent.skinnum = (s1->skinnum >> ((rand() % 4) * 8)) & 0xff;
+            ent.alpha = 0.30f;
+            ent.skinnum = (s1->skinnum >> ((Q_rand() % 4) * 8)) & 0xff;
             ent.model = 0;
         } else {
             // set skin
-            if (s1->modelindex == 255) {
+            if (s1->modelindex == MODELINDEX_PLAYER) {
                 // use custom player skin
                 ent.skinnum = 0;
                 ci = &cl.clientinfo[s1->skinnum & 0xff];
@@ -661,7 +691,7 @@ static void CL_AddPacketEntities(void)
                 if (renderfx & RF_USE_DISGUISE) {
                     char buffer[MAX_QPATH];
 
-                    Q_concat(buffer, sizeof(buffer), "players/", ci->model_name, "/disguise.pcx", NULL);
+                    Q_concat(buffer, sizeof(buffer), "players/", ci->model_name, "/disguise.pcx");
                     ent.skin = R_RegisterSkin(buffer);
                 }
             } else {
@@ -673,12 +703,18 @@ static void CL_AddPacketEntities(void)
             }
         }
 
+        // allow skin override for remaster
+        if (cl.csr.extended && renderfx & RF_CUSTOMSKIN && (unsigned)s1->skinnum < cl.csr.max_images) {
+            ent.skin = cl.image_precache[s1->skinnum];
+            ent.skinnum = 0;
+        }
+
         // only used for black hole model right now, FIXME: do better
         if ((renderfx & RF_TRANSLUCENT) && !(renderfx & RF_BEAM))
-            ent.alpha = 0.70;
+            ent.alpha = 0.70f;
 
         // render effects (fullbright, translucent, etc)
-        if ((effects & EF_COLOR_SHELL))
+        if (effects & EF_COLOR_SHELL)
             ent.flags = 0;  // renderfx go on color shell entity
         else
             ent.flags = renderfx;
@@ -704,32 +740,35 @@ static void CL_AddPacketEntities(void)
         } else { // interpolate angles
             LerpAngles(cent->prev.angles, cent->current.angles,
                        cl.lerpfrac, ent.angles);
-
             // mimic original ref_gl "leaning" bug (uuugly!)
-            if (s1->modelindex == 255 && cl_rollhack->integer) {
+            if (s1->modelindex == MODELINDEX_PLAYER && cl_rollhack->integer)
                 ent.angles[ROLL] = -ent.angles[ROLL];
-            }
         }
 
+        if (s1->morefx & EFX_FLASHLIGHT) {
+            V_Flashlight(&ent, s1);
+        }
+
+        if (s1->morefx & EFX_GRENADE_LIGHT)
+            V_AddLight(ent.origin, 100, 1, 1, 0);
+
         int base_entity_flags = 0;
-
         if (s1->number == cl.frame.clientNum + 1) {
-            if (effects & EF_FLAG1)
-                V_AddLight(ent.origin, 225, 1.0, 0.1, 0.1);
-            else if (effects & EF_FLAG2)
-                V_AddLight(ent.origin, 225, 0.1, 0.1, 1.0);
-            else if (effects & EF_TAGTRAIL)
-                V_AddLight(ent.origin, 225, 1.0, 1.0, 0.0);
-            else if (effects & EF_TRACKERTRAIL)
-                V_AddLight(ent.origin, 225, -1.0, -1.0, -1.0);
+            if (!cl.thirdPersonView) {
+                if (effects & EF_FLAG1)
+                    V_AddLight(ent.origin, 225, 1.0f, 0.1f, 0.1f);
+                else if (effects & EF_FLAG2)
+                    V_AddLight(ent.origin, 225, 0.1f, 0.1f, 1.0f);
+                else if (effects & EF_TAGTRAIL)
+                    V_AddLight(ent.origin, 225, 1.0f, 1.0f, 0.0f);
+                else if (effects & EF_TRACKERTRAIL)
+                    V_AddLight(ent.origin, 225, -1.0f, -1.0f, -1.0f);
 
-			if (!cl.thirdPersonView)
-			{
-				if(vid_rtx->integer)
-					base_entity_flags |= RF_VIEWERMODEL;    // only draw from mirrors
-				else
-					goto skip;
-			}
+                if(cls.ref_type == REF_TYPE_VKPT)
+                    base_entity_flags |= RF_VIEWERMODEL;    // only draw from mirrors
+                else
+                    goto skip;
+            }
 
 			// don't tilt the model - looks weird
 			ent.angles[0] = 0.f;
@@ -745,38 +784,44 @@ static void CL_AddPacketEntities(void)
         }
 
         // if set to invisible, skip
-        if (!s1->modelindex) {
+        if (!s1->modelindex)
             goto skip;
-        }
 
         if (effects & EF_BFG) {
             ent.flags |= RF_TRANSLUCENT;
-            ent.alpha = 0.30;
+            ent.alpha = 0.30f;
         }
 
         if (effects & EF_PLASMA) {
             ent.flags |= RF_TRANSLUCENT;
-            ent.alpha = 0.6;
+            ent.alpha = 0.6f;
         }
 
         if (effects & EF_SPHERETRANS) {
             ent.flags |= RF_TRANSLUCENT;
             if (effects & EF_TRACKERTRAIL)
-                ent.alpha = 0.6;
+                ent.alpha = 0.6f;
             else
-                ent.alpha = 0.3;
+                ent.alpha = 0.3f;
         }
 
         ent.flags |= base_entity_flags;
 
+        if (!(ent.flags & RF_TRANSLUCENT) && s1->alpha > 0 && s1->alpha < 1) {
+            ent.flags |= RF_TRANSLUCENT;
+            ent.alpha = s1->alpha;
+        }
+
 		// in rtx mode, the base entity has the renderfx for shells
-		if ((effects & EF_COLOR_SHELL) && vid_rtx->integer) {
+		if ((effects & EF_COLOR_SHELL) && cls.ref_type == REF_TYPE_VKPT) {
 			renderfx = adjust_shell_fx(renderfx);
 			ent.flags |= renderfx;
 		}
 
+        ent.scale = s1->scale;
+
         // add to refresh list
-		V_AddEntity(&ent);
+        V_AddEntity(&ent);
 
 		// add dlights for flares
 		model_t* model;
@@ -795,15 +840,15 @@ static void CL_AddPacketEntities(void)
 				VectorCopy(ent.origin, origin);
 				origin[2] += offset;
 
-				V_AddLightEx(origin, 500.f, 1.6f * brightness, 1.0f * brightness, 0.2f * brightness, 5.f);
-			}
-		}
+				V_AddSphereLight(origin, 500.f, 1.6f * brightness, 1.0f * brightness, 0.2f * brightness, 5.f);
+                    }
+                }
 
         // color shells generate a separate entity for the main model
-        if ((effects & EF_COLOR_SHELL) && !vid_rtx->integer) {
+        if ((effects & EF_COLOR_SHELL) && cls.ref_type != REF_TYPE_VKPT) {
 			renderfx = adjust_shell_fx(renderfx);
             ent.flags = renderfx | RF_TRANSLUCENT | base_entity_flags;
-            ent.alpha = 0.30;
+            ent.alpha = 0.30f;
             V_AddEntity(&ent);
         }
 
@@ -814,7 +859,7 @@ static void CL_AddPacketEntities(void)
 
         // duplicate for linked models
         if (s1->modelindex2) {
-            if (s1->modelindex2 == 255) {
+            if (s1->modelindex2 == MODELINDEX_PLAYER) {
                 // custom weapon
                 ci = &cl.clientinfo[s1->skinnum & 0xff];
                 i = (s1->skinnum >> 8); // 0 is default weapon model
@@ -831,12 +876,12 @@ static void CL_AddPacketEntities(void)
                 ent.model = cl.model_draw[s1->modelindex2];
 
             // PMM - check for the defender sphere shell .. make it translucent
-            if (!Q_strcasecmp(cl.configstrings[CS_MODELS + (s1->modelindex2)], "models/items/shell/tris.md2")) {
-                ent.alpha = 0.32;
+            if (!Q_strcasecmp(cl.configstrings[cl.csr.models + s1->modelindex2], "models/items/shell/tris.md2")) {
+                ent.alpha = 0.32f;
                 ent.flags = RF_TRANSLUCENT;
             }
 
-			if ((effects & EF_COLOR_SHELL) && vid_rtx->integer) {
+			if ((effects & EF_COLOR_SHELL) && cls.ref_type == REF_TYPE_VKPT) {
 				ent.flags |= renderfx;
 			}
 
@@ -861,97 +906,112 @@ static void CL_AddPacketEntities(void)
             ent.model = cl_mod_powerscreen;
             ent.oldframe = 0;
             ent.frame = 0;
-            ent.flags |= (RF_TRANSLUCENT | RF_SHELL_GREEN);
-            ent.alpha = 0.30;
-            V_AddEntity(&ent);
+            ent.flags = RF_TRANSLUCENT;
+            ent.alpha = 0.30f;
+
+            // remaster powerscreen is tiny and needs scaling
+            if (cl.need_powerscreen_scale) {
+                vec3_t forward, mid, tmp;
+                VectorCopy(ent.origin, tmp);
+                VectorAvg(cent->mins, cent->maxs, mid);
+                VectorAdd(ent.origin, mid, ent.origin);
+                AngleVectors(ent.angles, forward, NULL, NULL);
+                VectorMA(ent.origin, cent->maxs[0], forward, ent.origin);
+                ent.scale = cent->radius * 0.8f;
+                ent.flags |= RF_FULLBRIGHT;
+                V_AddEntity(&ent);
+                VectorCopy(tmp, ent.origin);
+            } else {
+                ent.flags |= RF_SHELL_GREEN;
+                V_AddEntity(&ent);
+            }
         }
 
+        if (s1->morefx & EFX_HOLOGRAM)
+            CL_HologramParticles(ent.origin);
+
         // add automatic particle trails
-        if (effects & ~EF_ROTATE) {
-            if (effects & EF_ROCKET) {
-                if (!(cl_disable_particles->integer & NOPART_ROCKET_TRAIL)) {
-                    CL_RocketTrail(cent->lerp_origin, ent.origin, cent);
-                }
+        if (!(effects & EF_TRAIL_MASK))
+            goto skip;
+
+        if (effects & EF_ROCKET) {
+            if (cl.csr.extended && effects & EF_GIB)
+                CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, DT_FIREBALL);
+            else if (!(cl_disable_particles->integer & NOPART_ROCKET_TRAIL))
+                CL_RocketTrail(cent->lerp_origin, ent.origin, cent);
+            if (cl_dlight_hacks->integer & DLHACK_ROCKET_COLOR)
+                V_AddLight(ent.origin, 200, 1, 0.23f, 0);
+            else
                 V_AddLight(ent.origin, 200, 0.6f, 0.4f, 0.12f);
-            } else if (effects & EF_BLASTER) {
-                if (effects & EF_TRACKER) {
-                    CL_BlasterTrail2(cent->lerp_origin, ent.origin);
-                    V_AddLight(ent.origin, 200, 0.1f, 0.4f, 0.12f);
-                } else {
-                    CL_BlasterTrail(cent->lerp_origin, ent.origin);
-                    V_AddLight(ent.origin, 200, 0.6f, 0.4f, 0.12f);
-                }
-            } else if (effects & EF_HYPERBLASTER) {
-                if (effects & EF_TRACKER)
-                    V_AddLight(ent.origin, 200, 0.1f, 0.4f, 0.12f);
-                else
-                    V_AddLight(ent.origin, 200, 0.6f, 0.4f, 0.12f);
-            } else if (effects & EF_GIB) {
-                CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, effects);
-            } else if (effects & EF_GRENADE) {
-                if (!(cl_disable_particles->integer & NOPART_GRENADE_TRAIL)) {
-                    CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, effects);
-                }
-            } else if (effects & EF_FLIES) {
-                CL_FlyEffect(cent, ent.origin);
-            } else if (effects & EF_BFG) {
-                if (effects & EF_ANIM_ALLFAST) {
-                    CL_BfgParticles(&ent);
-#if USE_DLIGHTS
-                    i = 100;
-                } else {
-                    static const int bfg_lightramp[6] = {300, 400, 600, 300, 150, 75};
-
-                    i = s1->frame; clamp(i, 0, 5);
-                    i = bfg_lightramp[i];
-#endif
-                }
-				const vec3_t nvgreen = { 0.2716f, 0.5795f, 0.04615f };
-				V_AddLightEx(ent.origin, i, nvgreen[0], nvgreen[1], nvgreen[2], 20.f);
-            } else if (effects & EF_TRAP) {
-                ent.origin[2] += 32;
-                CL_TrapParticles(&ent);
-#if USE_DLIGHTS
-                i = (rand() % 100) + 100;
-                V_AddLight(ent.origin, i, 1, 0.8, 0.1);
-#endif
-            } else if (effects & EF_FLAG1) {
-                CL_FlagTrail(cent->lerp_origin, ent.origin, 242);
-                V_AddLight(ent.origin, 225, 1, 0.1, 0.1);
-            } else if (effects & EF_FLAG2) {
-                CL_FlagTrail(cent->lerp_origin, ent.origin, 115);
-                V_AddLight(ent.origin, 225, 0.1, 0.1, 1);
-            } else if (effects & EF_TAGTRAIL) {
-                CL_TagTrail(cent->lerp_origin, ent.origin, 220);
-                V_AddLight(ent.origin, 225, 1.0, 1.0, 0.0);
-            } else if (effects & EF_TRACKERTRAIL) {
-                if (effects & EF_TRACKER) {
-#if USE_DLIGHTS
-                    float intensity;
-
-                    intensity = 50 + (500 * (sin(cl.time / 500.0) + 1.0));
-                    V_AddLight(ent.origin, intensity, -1.0, -1.0, -1.0);
-#endif
-                } else {
-                    CL_Tracker_Shell(cent->lerp_origin);
-                    V_AddLight(ent.origin, 155, -1.0, -1.0, -1.0);
-                }
-            } else if (effects & EF_TRACKER) {
-                CL_TrackerTrail(cent->lerp_origin, ent.origin, 0);
-                V_AddLight(ent.origin, 200, -1, -1, -1);
-            } else if (effects & EF_GREENGIB) {
-                CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, effects);
-            } else if (effects & EF_IONRIPPER) {
-                CL_IonripperTrail(cent->lerp_origin, ent.origin);
-                V_AddLight(ent.origin, 100, 1, 0.5, 0.5);
-            } else if (effects & EF_BLUEHYPERBLASTER) {
-                V_AddLight(ent.origin, 200, 0, 0, 1);
-            } else if (effects & EF_PLASMA) {
-                if (effects & EF_ANIM_ALLFAST) {
-                    CL_BlasterTrail(cent->lerp_origin, ent.origin);
-                }
-                V_AddLight(ent.origin, 130, 1, 0.5, 0.5);
+        } else if (effects & EF_BLASTER) {
+            if (effects & EF_TRACKER) {
+                CL_BlasterTrail2(cent->lerp_origin, ent.origin);
+                V_AddLight(ent.origin, 200, 0.1f, 0.4f, 0.12f);
+            } else {
+                CL_BlasterTrail(cent->lerp_origin, ent.origin);
+                V_AddLight(ent.origin, 200, 0.6f, 0.4f, 0.12f);
             }
+        } else if (effects & EF_HYPERBLASTER) {
+            if (effects & EF_TRACKER)
+                V_AddLight(ent.origin, 200, 0.1f, 0.4f, 0.12f);
+            else
+                V_AddLight(ent.origin, 200, 0.6f, 0.4f, 0.12f);
+        } else if (effects & EF_GIB) {
+            CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, DT_GIB);
+        } else if (effects & EF_GRENADE) {
+            if (!(cl_disable_particles->integer & NOPART_GRENADE_TRAIL))
+                CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, DT_SMOKE);
+        } else if (effects & EF_FLIES) {
+            CL_FlyEffect(cent, ent.origin);
+        } else if (effects & EF_BFG) {
+            static const uint16_t bfg_lightramp[6] = {300, 400, 600, 300, 150, 75};
+            if (effects & EF_ANIM_ALLFAST) {
+                CL_BfgParticles(&ent);
+                i = 100;
+            } else if (cl.csr.extended) {
+                i = bfg_lightramp[Q_clip(ent.oldframe, 0, 5)] * ent.backlerp +
+                    bfg_lightramp[Q_clip(ent.frame,    0, 5)] * (1.0f - ent.backlerp);
+            } else {
+                i = bfg_lightramp[Q_clip(s1->frame, 0, 5)];
+            }
+            const vec3_t nvgreen = { 0.2716f, 0.5795f, 0.04615f };
+            V_AddSphereLight(ent.origin, i, nvgreen[0], nvgreen[1], nvgreen[2], 20.f);
+        } else if (effects & EF_TRAP) {
+            ent.origin[2] += 32;
+            CL_TrapParticles(cent, ent.origin);
+            i = (Q_rand() % 100) + 100;
+            V_AddLight(ent.origin, i, 1, 0.8f, 0.1f);
+        } else if (effects & EF_FLAG1) {
+            CL_FlagTrail(cent->lerp_origin, ent.origin, 242);
+            V_AddLight(ent.origin, 225, 1, 0.1f, 0.1f);
+        } else if (effects & EF_FLAG2) {
+            CL_FlagTrail(cent->lerp_origin, ent.origin, 115);
+            V_AddLight(ent.origin, 225, 0.1f, 0.1f, 1);
+        } else if (effects & EF_TAGTRAIL) {
+            CL_TagTrail(cent->lerp_origin, ent.origin, 220);
+            V_AddLight(ent.origin, 225, 1.0f, 1.0f, 0.0f);
+        } else if (effects & EF_TRACKERTRAIL) {
+            if (effects & EF_TRACKER) {
+                float intensity = 50 + (500 * (sin(cl.time / 500.0f) + 1.0f));
+                V_AddLight(ent.origin, intensity, -1.0f, -1.0f, -1.0f);
+            } else {
+                CL_Tracker_Shell(cent, ent.origin);
+                V_AddLight(ent.origin, 155, -1.0f, -1.0f, -1.0f);
+            }
+        } else if (effects & EF_TRACKER) {
+            CL_TrackerTrail(cent->lerp_origin, ent.origin, 0);
+            V_AddLight(ent.origin, 200, -1, -1, -1);
+        } else if (effects & EF_GREENGIB) {
+            CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, DT_GREENGIB);
+        } else if (effects & EF_IONRIPPER) {
+            CL_IonripperTrail(cent->lerp_origin, ent.origin);
+            V_AddLight(ent.origin, 100, 1, 0.5f, 0.5f);
+        } else if (effects & EF_BLUEHYPERBLASTER) {
+            V_AddLight(ent.origin, 200, 0, 0, 1);
+        } else if (effects & EF_PLASMA) {
+            if (effects & EF_ANIM_ALLFAST)
+                CL_BlasterTrail(cent->lerp_origin, ent.origin);
+            V_AddLight(ent.origin, 130, 1, 0.5f, 0.5f);
         }
 
 skip:
@@ -963,9 +1023,6 @@ static int shell_effect_hack(void)
 {
     centity_t   *ent;
     int         flags = 0;
-
-    if (cl.frame.clientNum == CLIENTNUM_NONE)
-        return 0;
 
     ent = &cl_entities[cl.frame.clientNum + 1];
     if (ent->serverframe != cl.frame.number)
@@ -982,6 +1039,8 @@ static int shell_effect_hack(void)
         flags |= RF_SHELL_DOUBLE;
     if (ent->current.effects & EF_HALF_DAMAGE)
         flags |= RF_SHELL_HALF_DAM;
+    if (ent->current.morefx & EFX_DUALFIRE)
+        flags |= RF_SHELL_LITE_GREEN;
 
     return flags;
 }
@@ -1015,7 +1074,8 @@ static void CL_AddViewWeapon(void)
     if (gun_model) {
         gun.model = gun_model;  // development tool
     } else {
-        gun.model = cl.model_draw[ps->gunindex];
+        gun.model = cl.model_draw[ps->gunindex & GUNINDEX_MASK];
+        gun.skinnum = ps->gunindex >> GUNINDEX_BITS;
     }
     if (!gun.model) {
         return;
@@ -1031,36 +1091,15 @@ static void CL_AddViewWeapon(void)
                         ps->gunangles[i], CL_KEYLERPFRAC);
     }
 
-    // adjust for high fov
-    if (ps->fov > 90) {
-        vec_t ofs = (90 - ps->fov) * 0.2f;
-        VectorMA(gun.origin, ofs, cl.v_forward, gun.origin);
-    }
+    // Adjust the gun scale so that the gun doesn't intersect with walls.
+    // The gun models are not exactly centered at the camera, so adjusting its scale makes them
+    // shift on the screen a little when reasonable scale values are used. When extreme values are used,
+    // such as 0.01, they move significantly - so we clamp the scale value to an expected range here.
+    gun.scale = Cvar_ClampValue(cl_gunscale, 0.1f, 1.0f);
 
-	// adjust the gun origin so that the gun doesn't intersect with walls
-	{
-		vec3_t view_dir, right_dir, up_dir;
-		vec3_t gun_real_pos, gun_tip;
-		const float gun_length = 28.f;
-		const float gun_right = 10.f;
-		const float gun_up = -5.f;
-		trace_t trace;
-		static vec3_t mins = { -4, -4, -4 }, maxs = { 4, 4, 4 };
-
-		AngleVectors(cl.refdef.viewangles, view_dir, right_dir, up_dir);
-		VectorMA(gun.origin, gun_right, right_dir, gun_real_pos);
-		VectorMA(gun_real_pos, gun_up, up_dir, gun_real_pos);
-		VectorMA(gun_real_pos, gun_length, view_dir, gun_tip);
-
-		CM_BoxTrace(&trace, gun_real_pos, gun_tip, mins, maxs, cl.bsp->nodes, MASK_SOLID);
-
-		if (trace.fraction != 1.0f) 
-		{
-			VectorMA(trace.endpos, -gun_length, view_dir, gun.origin);
-			VectorMA(gun.origin, -gun_right, right_dir, gun.origin);
-			VectorMA(gun.origin, -gun_up, up_dir, gun.origin);
-		}
-	}
+    VectorMA(gun.origin, cl_gun_y->value * gun.scale, cl.v_forward, gun.origin);
+    VectorMA(gun.origin, cl_gun_x->value * gun.scale, cl.v_right, gun.origin);
+    VectorMA(gun.origin, cl_gun_z->value * gun.scale, cl.v_up, gun.origin);
 
     VectorCopy(gun.origin, gun.oldorigin);      // don't lerp at all
 
@@ -1078,31 +1117,28 @@ static void CL_AddViewWeapon(void)
     }
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
-    if (info_hand->integer == 1) {
-        gun.flags |= RF_LEFTHAND;
-    }
 
     if (cl_gunalpha->value != 1) {
         gun.alpha = Cvar_ClampValue(cl_gunalpha, 0.1f, 1.0f);
         gun.flags |= RF_TRANSLUCENT;
-	}
+    }
 
 	// add shell effect from player entity
 	shell_flags = shell_effect_hack();
 
 	// same entity in rtx mode
-	if (vid_rtx->integer) {
+	if (cls.ref_type == REF_TYPE_VKPT) {
 		gun.flags |= shell_flags;
 	}
 
 	model_t* model = MOD_ForHandle(gun.model);
 	if (model && strstr(model->name, "v_flareg"))
-		gun.scale = 0.3f;
+		gun.scale *= 0.3f; // The flare gun is modeled too large, scale it down to match other weapons
 
     V_AddEntity(&gun);
 
 	// separate entity in non-rtx mode
-    if (shell_flags && !vid_rtx->integer) {
+    if (shell_flags && cls.ref_type != REF_TYPE_VKPT) {
         gun.alpha = 0.30f * cl_gunalpha->value;
         gun.flags |= shell_flags | RF_TRANSLUCENT;
         V_AddEntity(&gun);
@@ -1129,7 +1165,7 @@ static void CL_SetupFirstPersonView(void)
     // add the weapon
     CL_AddViewWeapon();
 
-    cl.thirdPersonView = qfalse;
+    cl.thirdPersonView = false;
 }
 
 /*
@@ -1143,7 +1179,7 @@ static void CL_SetupThirdPersionView(void)
     float fscale, rscale;
     float dist, angle, range;
     trace_t trace;
-    static vec3_t mins = { -4, -4, -4 }, maxs = { 4, 4, 4 };
+    static const vec3_t mins = { -4, -4, -4 }, maxs = { 4, 4, 4 };
 
     // if dead, set a nice view angle
     if (cl.frame.ps.stats[STAT_HEALTH] <= 0) {
@@ -1172,12 +1208,12 @@ static void CL_SetupThirdPersionView(void)
     }
 
     VectorSubtract(focus, cl.refdef.vieworg, focus);
-    dist = sqrt(focus[0] * focus[0] + focus[1] * focus[1]);
+    dist = sqrtf(focus[0] * focus[0] + focus[1] * focus[1]);
 
-    cl.refdef.viewangles[PITCH] = -180 / M_PI * atan2(focus[2], dist);
+    cl.refdef.viewangles[PITCH] = -RAD2DEG(atan2(focus[2], dist));
     cl.refdef.viewangles[YAW] -= cl_thirdperson_angle->value;
 
-    cl.thirdPersonView = qtrue;
+    cl.thirdPersonView = true;
 }
 
 static void CL_FinishViewValues(void)
@@ -1185,9 +1221,6 @@ static void CL_FinishViewValues(void)
     centity_t *ent;
 
     if (cl_player_model->integer != CL_PLAYER_MODEL_THIRD_PERSON)
-        goto first;
-
-    if (cl.frame.clientNum == CLIENTNUM_NONE)
         goto first;
 
     ent = &cl_entities[cl.frame.clientNum + 1];
@@ -1204,21 +1237,10 @@ first:
     CL_SetupFirstPersonView();
 }
 
-#if USE_SMOOTH_DELTA_ANGLES
-static inline float LerpShort(int a2, int a1, float frac)
-{
-    if (a1 - a2 > 32768)
-        a1 &= 65536;
-    if (a2 - a1 > 32768)
-        a1 &= 65536;
-    return a2 + frac * (a1 - a2);
-}
-#endif
-
 static inline float lerp_client_fov(float ofov, float nfov, float lerp)
 {
     if (cls.demo.playback) {
-        float fov = info_fov->value;
+        int fov = info_fov->integer;
 
         if (fov < 1)
             fov = 90;
@@ -1268,7 +1290,7 @@ void CL_CalcViewValues(void)
     if (!cls.demo.playback && cl_predict->integer && !(ps->pmove.pm_flags & PMF_NO_PREDICTION)) {
         // use predicted values
         unsigned delta = cls.realtime - cl.predicted_step_time;
-        float backlerp = lerp - 1.0;
+        float backlerp = lerp - 1.0f;
 
         VectorMA(cl.predicted_origin, backlerp, cl.prediction_error, cl.refdef.vieworg);
 
@@ -1280,13 +1302,13 @@ void CL_CalcViewValues(void)
             cl.refdef.vieworg[2] -= cl.predicted_step * (100 - delta) * 0.01f;
         }
     } else {
+        int i;
+
         // just use interpolated values
-        cl.refdef.vieworg[0] = ops->pmove.origin[0] * 0.125f +
-                               lerp * (ps->pmove.origin[0] - ops->pmove.origin[0]) * 0.125f;
-        cl.refdef.vieworg[1] = ops->pmove.origin[1] * 0.125f +
-                               lerp * (ps->pmove.origin[1] - ops->pmove.origin[1]) * 0.125f;
-        cl.refdef.vieworg[2] = ops->pmove.origin[2] * 0.125f +
-                               lerp * (ps->pmove.origin[2] - ops->pmove.origin[2]) * 0.125f;
+        for (i = 0; i < 3; i++) {
+            cl.refdef.vieworg[i] = SHORT2COORD(ops->pmove.origin[i] +
+                lerp * (ps->pmove.origin[i] - ops->pmove.origin[i]));
+        }
     }
 
     // if not running a demo or on a locked frame, add the local angle movement
@@ -1303,12 +1325,6 @@ void CL_CalcViewValues(void)
         // just use interpolated values
         LerpAngles(ops->viewangles, ps->viewangles, lerp, cl.refdef.viewangles);
     }
-
-#if USE_SMOOTH_DELTA_ANGLES
-    cl.delta_angles[0] = LerpShort(ops->pmove.delta_angles[0], ps->pmove.delta_angles[0], lerp);
-    cl.delta_angles[1] = LerpShort(ops->pmove.delta_angles[1], ps->pmove.delta_angles[1], lerp);
-    cl.delta_angles[2] = LerpShort(ops->pmove.delta_angles[2], ps->pmove.delta_angles[2], lerp);
-#endif
 
     // don't interpolate blend color
     Vector4Copy(ps->blend, cl.refdef.blend);
@@ -1345,28 +1361,55 @@ void CL_CalcViewValues(void)
     VectorCopy(cl.v_up, listener_up);
 }
 
-#if CL_RTX_SHADERBALLS
-extern qhandle_t cl_dev_shaderballs;
-vec3_t cl_dev_shaderballs_pos = { 0 };
-
-void CL_AddShaderBalls(void)
+void CL_AddTestModel(void)
 {
-	if (cl_dev_shaderballs != -1 && vid_rtx->integer)
-	{
-		model_t * model = MOD_ForHandle(cl_dev_shaderballs);
+    static float frame = 0.f;
+    static int prevtime = 0;
 
-		if (model != NULL && model->meshes != NULL)
-		{
-			entity_t entity = { 0 };
-			entity.model = cl_dev_shaderballs;
-			VectorCopy(cl_dev_shaderballs_pos, entity.origin);
-			entity.alpha = 1.0;
-			entity.id = RESERVED_ENTITIY_SHADERBALLS;
-			V_AddEntity(&entity);
-		}
-	}
+    if (cl_testmodel_handle != -1)
+    {
+        model_t* model = MOD_ForHandle(cl_testmodel_handle);
+
+        if (model != NULL && model->meshes != NULL)
+        {
+            entity_t entity = { 0 };
+            entity.model = cl_testmodel_handle;
+            entity.id = RESERVED_ENTITIY_TESTMODEL;
+
+        	VectorCopy(cl_testmodel_position, entity.origin);
+            VectorCopy(cl_testmodel_position, entity.oldorigin);
+
+            entity.alpha = Q_clipf(cl_testalpha->value, 0.f, 1.f);
+            if (entity.alpha < 1.f)
+                entity.flags |= RF_TRANSLUCENT;
+
+            int numframes = model->numframes;
+            if (model->iqmData)
+                numframes = (int)model->iqmData->num_poses;
+
+            if (numframes > 1 && prevtime != 0)
+            {
+                const float millisecond = 1e-3f;
+
+                int timediff = cl.time - prevtime;
+                frame += (float)timediff * millisecond * max(cl_testfps->value, 0.f);
+
+                if (frame >= (float)numframes || frame < 0.f)
+                    frame = 0.f;
+
+                float frac = frame - floorf(frame);
+
+                entity.oldframe = (int)frame;
+                entity.frame = entity.oldframe + 1;
+                entity.backlerp = 1.f - frac;
+            }
+
+            prevtime = cl.time;
+
+            V_AddEntity(&entity);
+        }
+    }
 }
-#endif
 
 /*
 ===============
@@ -1382,15 +1425,9 @@ void CL_AddEntities(void)
     CL_AddPacketEntities();
     CL_AddTEnts();
     CL_AddParticles();
-#if USE_DLIGHTS
     CL_AddDLights();
-#endif
-#if USE_LIGHTSTYLES
     CL_AddLightStyles();
-#endif
-#if CL_RTX_SHADERBALLS
-	CL_AddShaderBalls();
-#endif
+	CL_AddTestModel();
     LOC_AddLocationsToScene();
 }
 
@@ -1401,15 +1438,14 @@ CL_GetEntitySoundOrigin
 Called to get the sound spatialization origin
 ===============
 */
-void CL_GetEntitySoundOrigin(int entnum, vec3_t org)
+void CL_GetEntitySoundOrigin(unsigned entnum, vec3_t org)
 {
     centity_t   *ent;
     mmodel_t    *cm;
     vec3_t      mid;
 
-    if (entnum < 0 || entnum >= MAX_EDICTS) {
-        Com_Error(ERR_DROP, "%s: bad entnum: %d", __func__, entnum);
-    }
+    if (entnum >= cl.csr.max_edicts)
+        Com_Error(ERR_DROP, "%s: bad entity", __func__);
 
     if (!entnum || entnum == listener_entnum) {
         // should this ever happen?

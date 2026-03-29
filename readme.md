@@ -1,5 +1,19 @@
 # Quake II RTX
 
+## Project Discontinued
+
+**This repository is no longer maintained.**
+
+If you're looking for a downloadable installer for Quake II RTX, please visit the [Releases](https://github.com/NVIDIA/Q2RTX/releases) page.
+
+If you would like to make some improvements, feel free to fork this repository or look for other community projects based on Quake II RTX.
+
+<br>
+<br>
+<br>
+
+## Original README
+
 **Quake II RTX** is NVIDIA's attempt at implementing a fully functional 
 version of Id Software's 1997 hit game **Quake II** with RTX path-traced 
 global illumination.
@@ -9,7 +23,7 @@ branch of the Quake II open source engine. Q2VKPT was created by former
 NVIDIA intern Christoph Schied, a Ph.D. student at the Karlsruhe Institute 
 of Technology in Germany.
 
-Q2VKPT, in turn, builds upon [Q2PRO](https://skuller.net/q2pro/), which is a 
+Q2VKPT, in turn, builds upon [Q2PRO](https://github.com/skullernet/q2pro), which is a 
 modernized version of the Quake II engine. Consequently, many of the settings 
 and console variables that work for Q2PRO also work for Quake II RTX.
 
@@ -40,12 +54,13 @@ original game.
   - Player avatar (casting shadows, visible in reflections)
   - Recursive reflections and refractions on water and glass, mirror, and screen surfaces
   - Procedural environments (sky, mountains, clouds that react to lighting; also space)
-  - "Shader balls" as a way to experiment with materials and see how they look in different environments
   - Sunlight with direct and indirect illumination
   - Volumetric lighting (god-rays)
 
-You can download functional builds of the game from [NVIDIA](https://www.geforce.com/quakeiirtx/)
-or [Steam](https://store.steampowered.com/app/1089130/Quake_II_RTX/).
+You can download functional builds of the game from [GitHub Releases](https://github.com/NVIDIA/Q2RTX/releases).
+
+Latest development builds can be found in the [Actions](https://github.com/NVIDIA/Q2RTX/actions/workflows/build.yml) tab.
+To run a development build, download the artifact, extract it and put `q2rtx_media.pkz`, `blue_noise.pkz` and the `pak*.pak` files from the original game into `baseq2/`.
 
 ## Additional Information
 
@@ -79,13 +94,15 @@ recent ones).
 
 ### Operating System
 
-|             | Windows    | Linux        |
-|-------------|------------|--------------|
-| Min Version | Win 7 x64  | Ubuntu 16.04 |
+|             | Windows    | Linux                          |
+|-------------|------------|--------------------------------|
+| Min Version | Win 7 x64  | Ubuntu 16.04 x86_64 or aarch64 |
 
 Note: only the Windows 10 version has been extensively tested.
 
 Note: distributions that are binary compatible with Ubuntu 16.04 should work as well.
+
+Note: Linux ppc64le is also known to work though not officially supported.
 
 ### Software
 
@@ -106,6 +123,7 @@ Note: distributions that are binary compatible with Ubuntu 16.04 should work as 
 * [tinyobjloader-c](https://github.com/syoyo/tinyobjloader-c)
 * [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)
 * [glslang](https://github.com/KhronosGroup/glslang) (optional, see the `CONFIG_BUILD_GLSLANG` CMake option)
+* [openal-soft](https://github.com/kcat/openal-soft)
 
 ## Build Instructions
 
@@ -172,6 +190,45 @@ Settings for all these features can be found in the game menu. To adjust the set
 `pt_accumulation_rendering`, `pt_dof`, `pt_aperture`, `pt_freecam` and some other similar console variables in the 
 [Client Manual](doc/client.md).
 
+## Material System
+
+The engine has a system for defining various properties for surface materials, such as textures, material kinds, flags, etc.
+Materials are defined in `*.mat` files in a custom text-based format. The engine will read all `materials/*.mat` files from
+the game directory (or directories when playing a non-base game) in alphabetic order, and materials in the later files override
+the materials in the earlier files. Then the engine also reads a `<mapname>.mat` file when loading a map, and the materials
+defined in the map-specific file override global materials - but only those used for map geometry, not models.
+
+The `.mat` files consist of multiple material entries, where each entry can define multiple materials. For example:
+```
+textures/e1u2/wslt1_5,
+textures/e1u2/wslt1_6:
+    texture_base overrides/*.tga
+    texture_normals overrides/*_n.tga
+    texture_emissive overrides/*_light.tga
+    is_light 1
+    correct_albedo 1
+```
+
+The above example defines two materials that will be used for surfaces that reference `.wal` files with the same base names,
+and for each of these materials it defines three textures. The `*` symbol in the texture definition is replaced with the
+material base name, so either `wslt1_5` or `wslt1_6` in this example.
+
+When a material is not defined for a surface, the engine will look for textures with matching names and various extensions.
+First, it will look in the `overrides/` directory, then in the original texture path. Normal maps are searched with the `_n`
+suffix, and emissive maps are searched with the `_light` suffix. If no replacement files are found, just the original base
+texture will be used.
+
+Materials can also use the automatic emissive texture generation feature. This is the case for undefined materials when the
+`pt_enable_surface_lights` console variable is nonzero: wall surfaces with the `SURF_LIGHT` flag (but not `SURF_SKY` or
+`SURF_NODRAW`) will generate an emissive texture from the base texture and a threshold value, if no emissive texture is found,
+and marked with the `is_light` material flag.
+The threshold value is set using the `pt_surface_lights_threshold` variable.
+For defined materials you can the `synth_emissive` and `emissive_threshold` material properties to explicitly enable
+emissive texture generation.
+
+Materials can be examined and modified at run time, using the `mat` command. For example, `mat print` will print the properties
+of the currently targeted material to the console. To get more usage information, use `mat help`.
+
 ## MIDI Controller Support
 
 The Quake II console can be remote operated through a UDP connection, which
@@ -193,11 +250,11 @@ Note: the password set here should match the password specified in the korgi con
 Note 2: enabling the rcon backdoor allows other people to issue console commands to your game from 
 other computers, so choose a good password.
 
-## Shader Balls Feature
+## Test Model
 
-The engine includes support for placing a set of material sampling balls in any location. Follow these steps to use this feature:
+The engine includes support for placing a test model in any location. You can use any MD2, MD3 or IQM model. Follow these steps to use this feature:
 
-  - Download the `shader_balls.pkz` package from the [Releases](https://github.com/NVIDIA/Q2RTX/releases) page.
-  - Place or extract that package into your `baseq2` folder.
-  - Run the game with `cl_shaderballs` set to 1, either from command line or from console before loading a map.
-  - Use the `drop_balls` command to place the balls at the current player location.
+  - To use the material sampling balls model, download the `shader_balls.pkz` package from the [Releases](https://github.com/NVIDIA/Q2RTX/releases) page. Place or extract that package into your `baseq2` folder.
+  - Run the game with the `cl_testmodel` variable set to the path of the test model.
+  - Use the `puttest` command to place the test model at the current player location.
+  - Adjust the test model animation speed with the `cl_testfps` variable and its opacity with the `cl_testalpha` variable.

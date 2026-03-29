@@ -38,11 +38,11 @@ static int      anykeydown;
 // bitmap for generating button up commands
 static byte     buttondown[256 / 8];
 
-static qboolean key_overstrike;
+static bool     key_overstrike;
 
 typedef struct keyname_s {
-    char    *name;
-    int     keynum;
+    const char  *name;
+    int         keynum;
 } keyname_t;
 
 #define K(x) { #x, K_##x }
@@ -145,7 +145,7 @@ static const keyname_t keynames[] = {
 Key_GetOverstrikeMode
 ===================
 */
-qboolean Key_GetOverstrikeMode(void)
+bool Key_GetOverstrikeMode(void)
 {
     return key_overstrike;
 }
@@ -155,7 +155,7 @@ qboolean Key_GetOverstrikeMode(void)
 Key_SetOverstrikeMode
 ===================
 */
-void Key_SetOverstrikeMode(qboolean overstrike)
+void Key_SetOverstrikeMode(bool overstrike)
 {
     key_overstrike = overstrike;
 }
@@ -191,6 +191,10 @@ void Key_SetDest(keydest_t dest)
     if (diff & (KEY_CONSOLE | KEY_MENU)) {
         IN_Activate();
         CL_CheckForPause();
+    }
+
+    if (dest == KEY_GAME) {
+        anykeydown = 0;
     }
 }
 
@@ -256,7 +260,7 @@ given keynum.
 FIXME: handle quote special (general escape sequence?)
 ===================
 */
-char *Key_KeynumToString(int keynum)
+const char *Key_KeynumToString(int keynum)
 {
     const keyname_t *kn;
     static char tinystr[2];
@@ -285,7 +289,7 @@ Key_GetBinding
 Returns the name of the first key found.
 ===================
 */
-char *Key_GetBinding(const char *binding)
+const char *Key_GetBinding(const char *binding)
 {
     int key;
 
@@ -307,7 +311,7 @@ Key_GetBindingForKey
 Returns the command bound to a given key.
 ===================
 */
-char *Key_GetBindingForKey(int keynum)
+const char *Key_GetBindingForKey(int keynum)
 {
 	return keybindings[keynum];
 }
@@ -344,9 +348,7 @@ void Key_SetBinding(int keynum, const char *binding)
         return;
 
 // free old binding
-    if (keybindings[keynum]) {
-        Z_Free(keybindings[keynum]);
-    }
+    Z_Free(keybindings[keynum]);
 
 // allocate memory for new binding
     keybindings[keynum] = Z_CopyString(binding);
@@ -356,26 +358,19 @@ static void Key_Name_g(genctx_t *ctx)
 {
     const keyname_t *k;
 
-    ctx->ignorecase = qtrue;
-    for (k = keynames; k->name; k++) {
-        if (!Prompt_AddMatch(ctx, k->name)) {
-            break;
-        }
-    }
+    ctx->ignorecase = true;
+    for (k = keynames; k->name; k++)
+        Prompt_AddMatch(ctx, k->name);
 }
 
 static void Key_Bound_g(genctx_t *ctx)
 {
     int i;
 
-    ctx->ignorecase = qtrue;
-    for (i = 0; i < 256; i++) {
-        if (keybindings[i]) {
-            if (!Prompt_AddMatch(ctx, Key_KeynumToString(i))) {
-                break;
-            }
-        }
-    }
+    ctx->ignorecase = true;
+    for (i = 0; i < 256; i++)
+        if (keybindings[i])
+            Prompt_AddMatch(ctx, Key_KeynumToString(i));
 }
 
 static void Key_Bind_c(genctx_t *ctx, int argnum)
@@ -503,7 +498,7 @@ static void Key_Bindlist_f(void)
     }
 }
 
-static cmdreg_t c_keys[] = {
+static const cmdreg_t c_keys[] = {
     { "bind", Key_Bind_f, Key_Bind_c },
     { "unbind", Key_Unbind_f, Key_Unbind_c },
     { "unbindall", Key_Unbindall_f },
@@ -624,14 +619,12 @@ Called by the system between frames for both key up and key down events
 Should NOT be called during an interrupt!
 ===================
 */
-void Key_Event(unsigned key, qboolean down, unsigned time)
+void Key_Event(unsigned key, bool down, unsigned time)
 {
     char    *kb;
     char    cmd[MAX_STRING_CHARS];
 
-    if (key >= 256) {
-        Com_Error(ERR_FATAL, "%s: bad key", __func__);
-    }
+    Q_assert(key < 256);
 
     Com_DDDPrintf("%u: %c%s\n", time,
                   down ? '+' : '-', Key_KeynumToString(key));
@@ -672,8 +665,8 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
         }
 
         if (cls.key_dest == KEY_GAME &&
-            cl.frame.ps.stats[STAT_LAYOUTS] &&
-            cls.demo.playback == qfalse) {
+            cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_LAYOUT | LAYOUTS_INVENTORY | LAYOUTS_HELP) &&
+            !cls.demo.playback) {
             if (keydown[key] == 2) {
                 // force main menu if escape is held
                 UI_OpenMenu(UIMENU_GAME);
@@ -693,7 +686,7 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
             if (cls.state < ca_active && !(cls.key_dest & KEY_MENU)) {
                 UI_OpenMenu(UIMENU_MAIN);
             } else {
-                Con_Close(qtrue);
+                Con_Close(true);
             }
         } else if (cls.key_dest & KEY_MENU) {
             UI_KeyEvent(key, down);
@@ -720,11 +713,6 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
     // hack for demo freelook in windowed mode
     if (cls.key_dest == KEY_GAME && cls.demo.playback && key == K_SHIFT && keydown[key] <= 1) {
         IN_Activate();
-    }
-
-    // skip the rest of the cinematic
-    if (cls.key_dest == KEY_GAME && cls.state == ca_cinematic && down) {
-        SCR_FinishCinematic();
     }
 
 	if (cls.key_dest == KEY_GAME)
@@ -772,6 +760,11 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
                 // button commands add keynum and time as a parm
                 Q_snprintf(cmd, sizeof(cmd), "%s %i %i\n", kb, key, time);
                 Cbuf_AddText(&cmd_buffer, cmd);
+
+                // skip the rest of the cinematic
+                if (cls.state == ca_cinematic) {
+                    SCR_FinishCinematic();
+                }
             } else {
                 Cbuf_AddText(&cmd_buffer, kb);
                 Cbuf_AddText(&cmd_buffer, "\n");
@@ -779,9 +772,6 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
         }
         return;
     }
-
-    if (cls.key_dest == KEY_GAME)
-        return;
 
     if (!down) {
         if (cls.key_dest & KEY_MENU)
@@ -869,6 +859,33 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
 
 /*
 ===================
+Key_Event2
+
+Hack to emulate legacy modifier key presses.
+===================
+*/
+void Key_Event2(unsigned key, bool down, unsigned time)
+{
+    switch (key) {
+    case K_LALT:
+    case K_RALT:
+        Key_Event(K_ALT, down, time);
+        break;
+    case K_LCTRL:
+    case K_RCTRL:
+        Key_Event(K_CTRL, down, time);
+        break;
+    case K_LSHIFT:
+    case K_RSHIFT:
+        Key_Event(K_SHIFT, down, time);
+        break;
+    }
+
+    Key_Event(key, down, time);
+}
+
+/*
+===================
 Key_ClearStates
 ===================
 */
@@ -884,7 +901,7 @@ void Key_ClearStates(void)
 
     for (i = 0; i < 256; i++) {
         if (keydown[i])
-            Key_Event(i, qfalse, com_eventTime);
+            Key_Event(i, false, com_eventTime);
     }
 
     memset(buttondown, 0, sizeof(buttondown));

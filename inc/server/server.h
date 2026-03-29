@@ -16,18 +16,18 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef SERVER_H
-#define SERVER_H
+#pragma once
 
 #include "common/net/net.h"
 
+// if this is changed, Q2PRO protocol version must be changed too!
 typedef enum {
     ss_dead,            // no map loaded
     ss_loading,         // spawning level edicts
     ss_game,            // actively running
     ss_pic,             // showing static picture
     ss_broadcast,       // running MVD client
-    ss_cinematic,
+    ss_cinematic,       // playing a cinematic
 } server_state_t;
 
 #if USE_ICMP
@@ -40,13 +40,16 @@ unsigned SV_Frame(unsigned msec);
 void SV_SetConsoleTitle(void);
 #endif
 //void SV_ConsoleOutput(const char *msg);
+void SV_RestartFilesystem(void);
 
 #if USE_MVD_CLIENT && USE_CLIENT
-int MVD_GetDemoPercent(qboolean *paused, int *framenum);
+bool MVD_GetDemoStatus(float *progress, bool *paused, int *framenum);
+#else
+#define MVD_GetDemoStatus(progress, paused, framenum)   false
 #endif
 
-#if USE_CLIENT
+#if USE_SAVEGAMES
 char *SV_GetSaveInfo(const char *dir);
+#else
+#define SV_GetSaveInfo(dir) NULL
 #endif
-
-#endif // SERVER_H

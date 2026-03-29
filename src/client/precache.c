@@ -22,7 +22,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 //
 
 #include "client.h"
-#include "client/sound/vorbis.h"
 
 /*
 ================
@@ -37,12 +36,8 @@ void CL_ParsePlayerSkin(char *name, char *model, char *skin, const char *s)
     size_t len;
     char *t;
 
-    // configstring parsing guarantees that playerskins can never
-    // overflow, but still check the length to be entirely fool-proof
     len = strlen(s);
-    if (len >= MAX_QPATH) {
-        Com_Error(ERR_DROP, "%s: oversize playerskin", __func__);
-    }
+    Q_assert(len < MAX_QPATH);
 
     // isolate the player's name
     t = strchr(s, '\\');
@@ -115,7 +110,7 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
 
     // model file
     Q_concat(model_filename, sizeof(model_filename),
-             "players/", model_name, "/tris.md2", NULL);
+             "players/", model_name, "/tris.md2");
     ci->model = R_RegisterModel(model_filename);
     if (!ci->model && Q_stricmp(model_name, "male")) {
         strcpy(model_name, "male");
@@ -125,7 +120,7 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
 
     // skin file
     Q_concat(skin_filename, sizeof(skin_filename),
-             "players/", model_name, "/", skin_name, ".pcx", NULL);
+             "players/", model_name, "/", skin_name, ".pcx");
     ci->skin = R_RegisterSkin(skin_filename);
 
     // if we don't have the skin and the model was female,
@@ -146,7 +141,7 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
 
         // see if the skin exists for the male model
         Q_concat(skin_filename, sizeof(skin_filename),
-                 "players/male/", skin_name, ".pcx", NULL);
+                 "players/male/", skin_name, ".pcx");
         ci->skin = R_RegisterSkin(skin_filename);
     }
 
@@ -162,19 +157,19 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
     // weapon file
     for (i = 0; i < cl.numWeaponModels; i++) {
         Q_concat(weapon_filename, sizeof(weapon_filename),
-                 "players/", model_name, "/", cl.weaponModels[i], NULL);
+                 "players/", model_name, "/", cl.weaponModels[i]);
         ci->weaponmodel[i] = R_RegisterModel(weapon_filename);
         if (!ci->weaponmodel[i] && !Q_stricmp(model_name, "cyborg")) {
             // try male
             Q_concat(weapon_filename, sizeof(weapon_filename),
-                     "players/male/", cl.weaponModels[i], NULL);
+                     "players/male/", cl.weaponModels[i]);
             ci->weaponmodel[i] = R_RegisterModel(weapon_filename);
         }
     }
 
     // icon file
     Q_concat(icon_filename, sizeof(icon_filename),
-             "/players/", model_name, "/", skin_name, "_i.pcx", NULL);
+             "/players/", model_name, "/", skin_name, "_i.pcx");
     ci->icon = R_RegisterPic2(icon_filename);
 
     strcpy(ci->model_name, model_name);
@@ -207,8 +202,8 @@ void CL_RegisterSounds(void)
 
     S_BeginRegistration();
     CL_RegisterTEntSounds();
-    for (i = 1; i < MAX_SOUNDS; i++) {
-        s = cl.configstrings[CS_SOUNDS + i];
+    for (i = 1; i < cl.csr.max_sounds; i++) {
+        s = cl.configstrings[cl.csr.sounds + i];
         if (!s[0])
             break;
         cl.sound_precache[i] = S_RegisterSound(s);
@@ -225,31 +220,30 @@ Registers main BSP file and inline models
 */
 void CL_RegisterBspModels(void)
 {
-    qerror_t ret;
-    char *name;
-    int i;
+    char *name = cl.configstrings[cl.csr.models + 1];
+    int i, ret;
 
-    ret = BSP_Load(cl.configstrings[CS_MODELS + 1], &cl.bsp);
+    if (!name[0]) {
+        Com_Error(ERR_DROP, "%s: no map set", __func__);
+    }
+    ret = BSP_Load(name, &cl.bsp);
     if (cl.bsp == NULL) {
-        Com_Error(ERR_DROP, "Couldn't load %s: %s",
-                  cl.configstrings[CS_MODELS + 1], Q_ErrorString(ret));
+        Com_Error(ERR_DROP, "Couldn't load %s: %s", name, BSP_ErrorString(ret));
     }
 
-#if USE_MAPCHECKSUM
-    if (cl.bsp->checksum != atoi(cl.configstrings[CS_MAPCHECKSUM])) {
+    if (cl.bsp->checksum != Q_atoi(cl.configstrings[cl.csr.mapchecksum])) {
         if (cls.demo.playback) {
             Com_WPrintf("Local map version differs from demo: %i != %s\n",
-                        cl.bsp->checksum, cl.configstrings[CS_MAPCHECKSUM]);
+                        cl.bsp->checksum, cl.configstrings[cl.csr.mapchecksum]);
         } else {
             Com_Error(ERR_DROP, "Local map version differs from server: %i != %s",
-                      cl.bsp->checksum, cl.configstrings[CS_MAPCHECKSUM]);
+                      cl.bsp->checksum, cl.configstrings[cl.csr.mapchecksum]);
         }
     }
-#endif
 
-    for (i = 1; i < MAX_MODELS; i++) {
-        name = cl.configstrings[CS_MODELS + i];
-        if (!name[0]) {
+    for (i = 2; i < cl.csr.max_models; i++) {
+        name = cl.configstrings[cl.csr.models + i];
+        if (!name[0] && i != MODELINDEX_PLAYER) {
             break;
         }
         if (name[0] == '*')
@@ -279,9 +273,9 @@ void CL_RegisterVWepModels(void)
         return;
     }
 
-    for (i = 2; i < MAX_MODELS; i++) {
-        name = cl.configstrings[CS_MODELS + i];
-        if (!name[0]) {
+    for (i = 2; i < cl.csr.max_models; i++) {
+        name = cl.configstrings[cl.csr.models + i];
+        if (!name[0] && i != MODELINDEX_PLAYER) {
             break;
         }
         if (name[0] != '#') {
@@ -289,7 +283,7 @@ void CL_RegisterVWepModels(void)
         }
 
         // special player weapon model
-        strcpy(cl.weaponModels[cl.numWeaponModels++], name + 1);
+        Q_strlcpy(cl.weaponModels[cl.numWeaponModels++], name + 1, sizeof(cl.weaponModels[0]));
 
         if (cl.numWeaponModels == MAX_CLIENTWEAPONMODELS) {
             break;
@@ -305,23 +299,40 @@ CL_SetSky
 */
 void CL_SetSky(void)
 {
-    float       rotate;
+    float       rotate = 0;
+    int         autorotate = 1;
     vec3_t      axis;
 
-    rotate = atof(cl.configstrings[CS_SKYROTATE]);
+    sscanf(cl.configstrings[CS_SKYROTATE], "%f %d", &rotate, &autorotate);
     if (sscanf(cl.configstrings[CS_SKYAXIS], "%f %f %f",
                &axis[0], &axis[1], &axis[2]) != 3) {
         Com_DPrintf("Couldn't parse CS_SKYAXIS\n");
         VectorClear(axis);
     }
 
-    R_SetSky(cl.configstrings[CS_SKY], rotate, axis);
+    R_SetSky(cl.configstrings[CS_SKY], rotate, autorotate, axis);
 }
 
-#if CL_RTX_SHADERBALLS
-cvar_t* cvar_shaderballs;
-qhandle_t cl_dev_shaderballs = -1;
-#endif
+/*
+=================
+CL_RegisterImage
+
+Hack to handle RF_CUSTOMSKIN for remaster
+=================
+*/
+static qhandle_t CL_RegisterImage(const char *s)
+{
+    // if it's in a subdir and has an extension, it's either a sprite or a skin
+    // allow /some/pic.pcx escape syntax
+    if (cl.csr.extended && *s != '/' && *s != '\\' && *COM_FileExtension(s)) {
+        if (!FS_pathcmpn(s, CONST_STR_LEN("sprites/")))
+            return R_RegisterSprite(s);
+        if (strchr(s, '/'))
+            return R_RegisterSkin(s);
+    }
+
+    return R_RegisterPic2(s);
+}
 
 /*
 =================
@@ -347,23 +358,20 @@ void CL_PrepRefresh(void)
 
     CL_RegisterTEntModels();
 
-#if CL_RTX_SHADERBALLS
-	cvar_shaderballs = Cvar_Get("cl_shaderballs", "0", 0);
-	if (cvar_shaderballs->integer && vid_rtx->integer)
+	if (cl_testmodel->string && cl_testmodel->string[0])
 	{
-		cl_dev_shaderballs = R_RegisterModel("develop/objects/ShaderBallArray/ShaderBallArray16.MD3");
-		if (cl_dev_shaderballs)
-			Com_Printf("Loaded the ShaderBalls model\n");
+		cl_testmodel_handle = R_RegisterModel(cl_testmodel->string);
+		if (cl_testmodel_handle)
+			Com_Printf("Loaded the test model: %s\n", cl_testmodel->string);
 		else
-			Com_WPrintf("Failed to load the ShaderBalls model\n");
+			Com_WPrintf("Failed to load the test model from %s\n", cl_testmodel->string);
 	}
 	else
-		cl_dev_shaderballs = -1;
-#endif
+		cl_testmodel_handle = -1;
 
-    for (i = 2; i < MAX_MODELS; i++) {
-        name = cl.configstrings[CS_MODELS + i];
-        if (!name[0]) {
+    for (i = 2; i < cl.csr.max_models; i++) {
+        name = cl.configstrings[cl.csr.models + i];
+        if (!name[0] && i != MODELINDEX_PLAYER) {
             break;
         }
         if (name[0] == '#') {
@@ -373,17 +381,17 @@ void CL_PrepRefresh(void)
     }
 
     CL_LoadState(LOAD_IMAGES);
-    for (i = 1; i < MAX_IMAGES; i++) {
-        name = cl.configstrings[CS_IMAGES + i];
+    for (i = 1; i < cl.csr.max_images; i++) {
+        name = cl.configstrings[cl.csr.images + i];
         if (!name[0]) {
             break;
         }
-        cl.image_precache[i] = R_RegisterPic2(name);
+        cl.image_precache[i] = CL_RegisterImage(name);
     }
 
     CL_LoadState(LOAD_CLIENTS);
     for (i = 0; i < MAX_CLIENTS; i++) {
-        name = cl.configstrings[CS_PLAYERSKINS + i];
+        name = cl.configstrings[cl.csr.playerskins + i];
         if (!name[0]) {
             continue;
         }
@@ -403,8 +411,8 @@ void CL_PrepRefresh(void)
 
     SCR_UpdateScreen();
 
-	int cdtrack = atoi(cl.configstrings[CS_CDTRACK]);
-    OGG_PlayTrack(cdtrack);
+    // start the cd track
+    OGG_Play();
 }
 
 /*
@@ -418,43 +426,33 @@ void CL_UpdateConfigstring(int index)
 {
     const char *s = cl.configstrings[index];
 
-    if (index == CS_MAXCLIENTS) {
-        cl.maxclients = atoi(s);
+    if (index == cl.csr.maxclients) {
+        cl.maxclients = Q_atoi(s);
         return;
     }
 
-    if (index == CS_AIRACCEL) {
-        if (cl.pmp.qwmode)
-            cl.pmp.airaccelerate = qtrue;
-        else
-            cl.pmp.airaccelerate = atoi(s) ? qtrue : qfalse;
+    if (index == cl.csr.airaccel) {
+        cl.pmp.airaccelerate = cl.pmp.qwmode || Q_atoi(s);
         return;
     }
 
-    if (index == CS_MODELS + 1) {
-        size_t len = strlen(s);
-
-        if (len <= 9) {
+    if (index == cl.csr.models + 1) {
+        if (!Com_ParseMapName(cl.mapname, s, sizeof(cl.mapname)))
             Com_Error(ERR_DROP, "%s: bad world model: %s", __func__, s);
-        }
-        memcpy(cl.mapname, s + 5, len - 9);   // skip "maps/"
-        cl.mapname[len - 9] = 0; // cut off ".bsp"
         return;
     }
 
-#if USE_LIGHTSTYLES
-    if (index >= CS_LIGHTS && index < CS_LIGHTS + MAX_LIGHTSTYLES) {
-        CL_SetLightStyle(index - CS_LIGHTS, s);
+    if (index >= cl.csr.lights && index < cl.csr.lights + MAX_LIGHTSTYLES) {
+        CL_SetLightStyle(index - cl.csr.lights, s);
         return;
     }
-#endif
 
     if (cls.state < ca_precached) {
         return;
     }
 
-    if (index >= CS_MODELS + 2 && index < CS_MODELS + MAX_MODELS) {
-        int i = index - CS_MODELS;
+    if (index >= cl.csr.models + 2 && index < cl.csr.models + cl.csr.max_models) {
+        int i = index - cl.csr.models;
 
         cl.model_draw[i] = R_RegisterModel(s);
         if (*s == '*')
@@ -464,18 +462,23 @@ void CL_UpdateConfigstring(int index)
         return;
     }
 
-    if (index >= CS_SOUNDS && index < CS_SOUNDS + MAX_SOUNDS) {
-        cl.sound_precache[index - CS_SOUNDS] = S_RegisterSound(s);
+    if (index >= cl.csr.sounds && index < cl.csr.sounds + cl.csr.max_sounds) {
+        cl.sound_precache[index - cl.csr.sounds] = S_RegisterSound(s);
         return;
     }
 
-    if (index >= CS_IMAGES && index < CS_IMAGES + MAX_IMAGES) {
-        cl.image_precache[index - CS_IMAGES] = R_RegisterPic2(s);
+    if (index >= cl.csr.images && index < cl.csr.images + cl.csr.max_images) {
+        cl.image_precache[index - cl.csr.images] = CL_RegisterImage(s);
         return;
     }
 
-    if (index >= CS_PLAYERSKINS && index < CS_PLAYERSKINS + MAX_CLIENTS) {
-        CL_LoadClientinfo(&cl.clientinfo[index - CS_PLAYERSKINS], s);
+    if (index >= cl.csr.playerskins && index < cl.csr.playerskins + MAX_CLIENTS) {
+        CL_LoadClientinfo(&cl.clientinfo[index - cl.csr.playerskins], s);
+        return;
+    }
+
+    if (index == CS_CDTRACK) {
+        OGG_Play();
         return;
     }
 }

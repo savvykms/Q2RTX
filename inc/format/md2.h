@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef FORMAT_MD2_H
-#define FORMAT_MD2_H
+#pragma once
 
 /*
 ========================================================================
@@ -27,12 +26,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 ========================================================================
 */
 
-#define MD2_IDENT       (('2'<<24)+('P'<<16)+('D'<<8)+'I')
+#define MD2_IDENT       MakeLittleLong('I','D','P','2')
 #define MD2_VERSION     8
 
 #define MD2_MAX_TRIANGLES   4096
 #define MD2_MAX_VERTS       2048
-#define MD2_MAX_FRAMES      512
+#define MD2_MAX_FRAMES      1024
 #define MD2_MAX_SKINS       32
 #define MD2_MAX_SKINNAME    64
 #define MD2_MAX_SKINWIDTH   640
@@ -94,5 +93,3 @@ typedef struct dmd2header_s {
     uint32_t        ofs_glcmds;
     uint32_t        ofs_end;        // end of file
 } dmd2header_t;
-
-#endif // FORMAT_MD2_H

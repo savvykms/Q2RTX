@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // cl_view.c -- player rendering positioning
 
 #include "client.h"
+#include "shared/debug.h"
 
 //=============
 //
@@ -30,30 +31,30 @@ qhandle_t   gun_model;
 //=============
 
 static cvar_t   *cl_add_particles;
-#if USE_DLIGHTS
 static cvar_t   *cl_add_lights;
 static cvar_t   *cl_show_lights;
-#endif
+static cvar_t   *cl_flashlight;
+static cvar_t   *cl_flashlight_intensity;
 static cvar_t   *cl_add_entities;
 static cvar_t   *cl_add_blend;
+static cvar_t   *cl_flashlight_offset;
+static vec3_t   flashlight_offset;
 
-#ifdef _DEBUG
+#if USE_DEBUG
 static cvar_t   *cl_testparticles;
 static cvar_t   *cl_testentities;
-#if USE_DLIGHTS
 static cvar_t   *cl_testlights;
-#endif
 static cvar_t   *cl_testblend;
+static cvar_t   *cl_testdebuglines;
 
 static cvar_t   *cl_stats;
 #endif
 
-static cvar_t   *cl_adjustfov;
+cvar_t   *cl_adjustfov;
 
-#if USE_DLIGHTS
 int         r_numdlights;
 dlight_t    r_dlights[MAX_DLIGHTS];
-#endif
+static qhandle_t flashlight_profile_tex;
 
 int         r_numentities;
 entity_t    r_entities[MAX_ENTITIES];
@@ -61,9 +62,7 @@ entity_t    r_entities[MAX_ENTITIES];
 int         r_numparticles;
 particle_t  r_particles[MAX_PARTICLES];
 
-#if USE_LIGHTSTYLES
 lightstyle_t    r_lightstyles[MAX_LIGHTSTYLES];
-#endif
 
 /*
 ====================
@@ -74,9 +73,7 @@ Specifies the model that will be used as the world
 */
 static void V_ClearScene(void)
 {
-#if USE_DLIGHTS
     r_numdlights = 0;
-#endif
     r_numentities = 0;
     r_numparticles = 0;
 }
@@ -110,20 +107,20 @@ void V_AddParticle(particle_t *p)
     r_particles[r_numparticles++] = *p;
 }
 
-#if USE_DLIGHTS
 /*
 =====================
 V_AddLight
 
 =====================
 */
-void V_AddLightEx(vec3_t org, float intensity, float r, float g, float b, float radius)
+void V_AddSphereLight(const vec3_t org, float intensity, float r, float g, float b, float radius)
 {
     dlight_t    *dl;
 
     if (r_numdlights >= MAX_DLIGHTS)
         return;
     dl = &r_dlights[r_numdlights++];
+    memset(dl, 0, sizeof(dlight_t));
     VectorCopy(org, dl->origin);
     dl->intensity = intensity;
     dl->color[0] = r;
@@ -147,36 +144,148 @@ void V_AddLightEx(vec3_t org, float intensity, float r, float g, float b, float 
 	}
 }
 
-void V_AddLight(vec3_t org, float intensity, float r, float g, float b)
+static dlight_t* add_spot_light_common(const vec3_t org, const vec3_t dir, float intensity, float r, float g, float b)
 {
-	V_AddLightEx(org, intensity, r, g, b, 10.f);
-}
-#endif
+    dlight_t    *dl;
 
-#if USE_LIGHTSTYLES
+    if (r_numdlights >= MAX_DLIGHTS)
+        return NULL;
+    dl = &r_dlights[r_numdlights++];
+    memset(dl, 0, sizeof(dlight_t));
+    VectorCopy(org, dl->origin);
+    dl->intensity = intensity;
+    dl->color[0] = r;
+    dl->color[1] = g;
+    dl->color[2] = b;
+    dl->radius = 1.0f;
+    dl->light_type = DLIGHT_SPOT;
+    VectorCopy(dir, dl->spot.direction);
+
+    // what would make sense for cl_show_lights here?
+
+    return dl;
+}
+
+void V_AddSpotLight(const vec3_t org, const vec3_t dir, float intensity, float r, float g, float b, float width_angle, float falloff_angle)
+{
+    dlight_t *dl = add_spot_light_common(org, dir, intensity, r, g, b);
+    if(!dl)
+        return;
+
+    dl->spot.emission_profile = DLIGHT_SPOT_EMISSION_PROFILE_FALLOFF;
+    dl->spot.cos_total_width = cosf(DEG2RAD(width_angle));
+    dl->spot.cos_falloff_start = cosf(DEG2RAD(falloff_angle));
+}
+
+void V_AddSpotLightTexEmission(const vec3_t org, const vec3_t dir, float intensity, float r, float g, float b, float width_angle, qhandle_t emission_tex)
+{
+    dlight_t *dl = add_spot_light_common(org, dir, intensity, r, g, b);
+    if(!dl)
+        return;
+
+    dl->spot.emission_profile = DLIGHT_SPOT_EMISSION_PROFILE_AXIS_ANGLE_TEXTURE;
+    dl->spot.total_width = DEG2RAD(width_angle);
+    dl->spot.texture = emission_tex;
+}
+
+void V_AddLight(const vec3_t org, float intensity, float r, float g, float b)
+{
+	V_AddSphereLight(org, intensity, r, g, b, 10.f);
+}
+
+void V_Flashlight(const entity_t *ent, const centity_state_t *cent_state)
+{
+    // Flashlight origin
+    vec3_t light_pos;
+    // Flashlight direction vectors
+    vec3_t view_dir, right_dir, up_dir;
+
+    if (!ent || cent_state->number == cl.frame.clientNum + 1) {
+        player_state_t* ps = &cl.frame.ps;
+        player_state_t* ops = &cl.oldframe.ps;
+
+        // Flashlight direction (as angles)
+        vec3_t flashlight_angles;
+
+        if (cls.demo.playback) {
+            /* If a demo is played we don't have predicted_angles,
+             * and we can't use cl.refdef.viewangles for the same reason
+             * below. However, lerping the angles from the old & current frame
+             * work nicely. */
+            LerpAngles(cl.oldframe.ps.viewangles, cl.frame.ps.viewangles, cl.lerpfrac, flashlight_angles);
+        } else {
+            /* Use cl.playerEntityOrigin+viewoffset, playerEntityAngles instead of
+             * cl.refdef.vieworg, cl.refdef.viewangles as as the cl.refdef values
+             * are the camera values, but not the player "eye" values in 3rd person mode. */
+            VectorCopy(cl.predicted_angles, flashlight_angles);
+        }
+        // Add a bit of gun bob to the flashlight as well
+        vec3_t gunangles;
+        LerpVector(ops->gunangles, ps->gunangles, cl.lerpfrac, gunangles);
+        VectorAdd(flashlight_angles, gunangles, flashlight_angles);
+
+        AngleVectors(flashlight_angles, view_dir, right_dir, up_dir);
+
+        /* Start off with the player eye position. */
+        vec3_t viewoffset;
+        LerpVector(ops->viewoffset, ps->viewoffset, cl.lerpfrac, viewoffset);
+        VectorAdd(cl.playerEntityOrigin, viewoffset, light_pos);
+
+        /* Slightly move position downward, right, and forward to get a position
+         * that looks somewhat as if it was attached to the gun.
+         * Generally, the spot light origin should be placed away from the player model
+         * to avoid interactions with it (mainly unexpected shadowing).
+         * When adjusting the offsets care must be taken that
+         * the flashlight doesn't also light the view weapon. */
+        VectorMA(light_pos, flashlight_offset[2] * cl_gunscale->value, view_dir, light_pos);
+        float leftright = flashlight_offset[0] * cl_gunscale->value;
+        if(info_hand->integer == 1)
+            leftright = -leftright; // left handed
+        else if(info_hand->integer == 2)
+            leftright = 0.f; // "center" handed
+        VectorMA(light_pos, leftright, right_dir, light_pos);
+        VectorMA(light_pos, flashlight_offset[1] * cl_gunscale->value, up_dir, light_pos);
+    } else {
+        AngleVectors(ent->angles, view_dir, right_dir, up_dir);
+        VectorCopy(ent->origin, light_pos);
+    }
+
+    if(cls.ref_type == REF_TYPE_VKPT) {
+        V_AddSpotLightTexEmission(light_pos, view_dir, cl_flashlight_intensity->value, 1.f, 1.f, 1.f, 90.0f, flashlight_profile_tex);
+    } else {
+        const int cent_num = cent_state ? cent_state->number : cl.frame.clientNum + 1;
+        centity_t *cent = &cl_entities[cent_num];
+        vec3_t start, end;
+        trace_t trace;
+
+        VectorMA(light_pos, 256, view_dir, end);
+        VectorCopy(light_pos, start);
+
+        CL_Trace(&trace, start, vec3_origin, vec3_origin, end, CONTENTS_SOLID | CONTENTS_MONSTER);
+        LerpVector(start, end, cent->flashlightfrac, end);
+        V_AddLight(end, 256, 1, 1, 1);
+
+        // smooth out distance "jumps"
+        CL_AdvanceValue(&cent->flashlightfrac, trace.fraction, 1);
+    }
+}
+
 /*
 =====================
 V_AddLightStyle
 
 =====================
 */
-void V_AddLightStyle(int style, vec4_t value)
+void V_AddLightStyle(int style, float value)
 {
     lightstyle_t    *ls;
 
-    if (style < 0 || style >= MAX_LIGHTSTYLES)
-        Com_Error(ERR_DROP, "Bad light style %i", style);
+    Q_assert(style >= 0 && style < MAX_LIGHTSTYLES);
     ls = &r_lightstyles[style];
-
-    //ls->white = r+g+b;
-    ls->rgb[0] = value[0];
-    ls->rgb[1] = value[1];
-    ls->rgb[2] = value[2];
-    ls->white = value[3];
+    ls->white = value;
 }
-#endif
 
-#ifdef _DEBUG
+#if USE_DEBUG
 
 /*
 ================
@@ -193,9 +302,9 @@ static void V_TestParticles(void)
 
     r_numparticles = MAX_PARTICLES;
     for (i = 0; i < r_numparticles; i++) {
-        d = i * 0.25;
-        r = 4 * ((i & 7) - 3.5);
-        u = 4 * (((i >> 3) & 7) - 3.5);
+        d = i * 0.25f;
+        r = 4 * ((i & 7) - 3.5f);
+        u = 4 * (((i >> 3) & 7) - 3.5f);
         p = &r_particles[i];
 
         for (j = 0; j < 3; j++)
@@ -203,7 +312,7 @@ static void V_TestParticles(void)
                            cl.v_right[j] * r + cl.v_up[j] * u;
 
         p->color = 8;
-        p->alpha = cl_testparticles->value;
+        p->alpha = 1;
     }
 }
 
@@ -226,7 +335,7 @@ static void V_TestEntities(void)
     for (i = 0; i < r_numentities; i++) {
         ent = &r_entities[i];
 
-        r = 64 * ((i % 4) - 1.5);
+        r = 64 * ((i % 4) - 1.5f);
         f = 64 * (i / 4) + 128;
 
         for (j = 0; j < 3; j++)
@@ -238,7 +347,6 @@ static void V_TestEntities(void)
     }
 }
 
-#if USE_DLIGHTS
 /*
 ================
 V_TestLights
@@ -254,6 +362,7 @@ static void V_TestLights(void)
 
     if (cl_testlights->integer != 1) {
         dl = &r_dlights[0];
+        memset(dl, 0, sizeof(dlight_t));
         r_numdlights = 1;
 
         VectorMA(cl.refdef.vieworg, 256, cl.v_forward, dl->origin);
@@ -262,6 +371,7 @@ static void V_TestLights(void)
         else
             VectorSet(dl->color, 1, 1, 1);
         dl->intensity = 256;
+        dl->radius = 16;
         return;
     }
 
@@ -271,7 +381,7 @@ static void V_TestLights(void)
     for (i = 0; i < r_numdlights; i++) {
         dl = &r_dlights[i];
 
-        r = 64 * ((i % 4) - 1.5);
+        r = 64 * ((i % 4) - 1.5f);
         f = 64 * (i / 4) + 128;
 
         for (j = 0; j < 3; j++)
@@ -281,9 +391,33 @@ static void V_TestLights(void)
         dl->color[1] = (((i % 6) + 1) & 2) >> 1;
         dl->color[2] = (((i % 6) + 1) & 4) >> 2;
         dl->intensity = 200;
+        dl->radius = 16;
     }
 }
-#endif
+
+static void V_TestDebugLines(void)
+{
+    static const uint32_t colors[] = {U32_RED, U32_GREEN, U32_BLUE, U32_YELLOW, U32_MAGENTA, U32_CYAN};
+    const float point_size = 16.f;
+    const float text_size = 0.5f;
+
+    bool depth_test = cl_testdebuglines->integer == 1 || cl_testdebuglines->integer == 3;
+    bool print_id = cl_testdebuglines->integer >= 3;
+    for (int i = 0; i < r_numentities; i++) {
+        const entity_t *ent = r_entities + i;
+        if (ent->id == 1 /* gun */)
+            continue;
+        uint32_t color = colors[ent->id % q_countof(colors)];
+        R_AddDebugPoint(ent->origin, point_size, color, 0, depth_test);
+
+        if (print_id) {
+            vec3_t text_org;
+            VectorCopy(ent->origin, text_org);
+            text_org[2] += point_size;
+            R_AddDebugText(text_org, NULL, va("%d", ent->id), text_size, color, 0, depth_test);
+        }
+    }
+}
 
 #endif
 
@@ -291,17 +425,14 @@ static void V_TestLights(void)
 
 void CL_UpdateBlendSetting(void)
 {
-    if (cls.state < ca_connected) {
-        return;
-    }
-    if (cls.serverProtocol < PROTOCOL_VERSION_R1Q2) {
+    if (cls.netchan.protocol < PROTOCOL_VERSION_R1Q2) {
         return;
     }
 
     MSG_WriteByte(clc_setting);
     MSG_WriteShort(CLS_NOBLEND);
     MSG_WriteShort(!cl_add_blend->integer);
-    MSG_FlushTo(&cls.netchan->message);
+    MSG_FlushTo(&cls.netchan.message);
 }
 
 //============================================================================
@@ -329,7 +460,7 @@ static void V_Gun_Model_f(void)
         gun_model = 0;
         return;
     }
-    Q_concat(name, sizeof(name), "models/", Cmd_Argv(1), "/tris.md2", NULL);
+    Q_concat(name, sizeof(name), "models/", Cmd_Argv(1), "/tris.md2");
     gun_model = R_RegisterModel(name);
 }
 
@@ -381,13 +512,13 @@ float V_CalcFov(float fov_x, float width, float height)
     float    a;
     float    x;
 
-    if (fov_x < 1 || fov_x > 179)
+    if (fov_x <= 0 || fov_x > 179)
         Com_Error(ERR_DROP, "%s: bad fov: %f", __func__, fov_x);
 
-    x = width / tan(fov_x / 360 * M_PI);
+    x = width / tan(fov_x * (M_PI / 360));
 
     a = atan(height / x);
-    a = a * 360 / M_PI;
+    a = a * (360 / M_PI);
 
     return a;
 }
@@ -411,29 +542,34 @@ void V_RenderView(void)
         // v_forward, etc.
         CL_AddEntities();
 
-#ifdef _DEBUG
+#if USE_DEBUG
         if (cl_testparticles->integer)
             V_TestParticles();
         if (cl_testentities->integer)
             V_TestEntities();
-#if USE_DLIGHTS
         if (cl_testlights->integer)
             V_TestLights();
-#endif
         if (cl_testblend->integer) {
             cl.refdef.blend[0] = 1;
-            cl.refdef.blend[1] = 0.5;
-            cl.refdef.blend[2] = 0.25;
-            cl.refdef.blend[3] = 0.5;
+            cl.refdef.blend[1] = 0.5f;
+            cl.refdef.blend[2] = 0.25f;
+            cl.refdef.blend[3] = 0.5f;
         }
+        if (cl_testdebuglines->integer)
+            V_TestDebugLines();
 #endif
+
+        // Render client-side flash light, but skip if "flashlight" effect is already used on client ent
+        bool client_flashlight = (cl_entities[cl.frame.clientNum + 1].current.morefx & EFX_FLASHLIGHT) != 0;
+        if(cl_flashlight->integer && !client_flashlight)
+            V_Flashlight(NULL, NULL);
 
         // never let it sit exactly on a node line, because a water plane can
         // dissapear when viewed with the eye exactly on it.
         // the server protocol only specifies to 1/8 pixel, so add 1/16 in each axis
-        cl.refdef.vieworg[0] += 1.0 / 16;
-        cl.refdef.vieworg[1] += 1.0 / 16;
-        cl.refdef.vieworg[2] += 1.0 / 16;
+        cl.refdef.vieworg[0] += 1.0f / 16;
+        cl.refdef.vieworg[1] += 1.0f / 16;
+        cl.refdef.vieworg[2] += 1.0f / 16;
 
         cl.refdef.x = scr_vrect.x;
         cl.refdef.y = scr_vrect.y;
@@ -449,7 +585,7 @@ void V_RenderView(void)
             cl.refdef.fov_y = V_CalcFov(cl.refdef.fov_x, cl.refdef.width, cl.refdef.height);
         }
 
-        cl.refdef.time = cl.time * 0.001;
+        cl.refdef.time = cl.time * 0.001f;
 
         if (cl.frame.areabytes) {
             cl.refdef.areabits = cl.frame.areabits;
@@ -461,10 +597,8 @@ void V_RenderView(void)
             r_numentities = 0;
         if (!cl_add_particles->integer)
             r_numparticles = 0;
-#if USE_DLIGHTS
         if (!cl_add_lights->integer)
             r_numdlights = 0;
-#endif
         if (!cl_add_blend->integer)
             Vector4Clear(cl.refdef.blend);
 
@@ -472,13 +606,9 @@ void V_RenderView(void)
         cl.refdef.entities = r_entities;
         cl.refdef.num_particles = r_numparticles;
         cl.refdef.particles = r_particles;
-#if USE_DLIGHTS
         cl.refdef.num_dlights = r_numdlights;
         cl.refdef.dlights = r_dlights;
-#endif
-#if USE_LIGHTSTYLES
         cl.refdef.lightstyles = r_lightstyles;
-#endif
 
         cl.refdef.rdflags = cl.frame.ps.rdflags;
 
@@ -487,13 +617,9 @@ void V_RenderView(void)
     }
 
     R_RenderFrame(&cl.refdef);
-#ifdef _DEBUG
+#if USE_DEBUG
     if (cl_stats->integer)
-#if USE_DLIGHTS
         Com_Printf("ent:%i  lt:%i  part:%i\n", r_numentities, r_numdlights, r_numparticles);
-#else
-        Com_Printf("ent:%i  part:%i\n", r_numentities, r_numparticles);
-#endif
 #endif
 
     V_SetLightLevel();
@@ -507,9 +633,7 @@ V_Viewpos_f
 */
 static void V_Viewpos_f(void)
 {
-    Com_Printf("(%i %i %i) : %i\n", (int)cl.refdef.vieworg[0],
-               (int)cl.refdef.vieworg[1], (int)cl.refdef.vieworg[2],
-               (int)cl.refdef.viewangles[YAW]);
+    Com_Printf("%s : %.f\n", vtos(cl.refdef.vieworg), cl.refdef.viewangles[YAW]);
 }
 
 static const cmdreg_t v_cmds[] = {
@@ -525,6 +649,11 @@ static void cl_add_blend_changed(cvar_t *self)
     CL_UpdateBlendSetting();
 }
 
+static void cl_flashlight_offset_changed(cvar_t *self)
+{
+    sscanf(cl_flashlight_offset->string, "%f %f %f", &flashlight_offset[0], &flashlight_offset[1], &flashlight_offset[2]);
+}
+
 /*
 =============
 V_Init
@@ -534,31 +663,40 @@ void V_Init(void)
 {
     Cmd_Register(v_cmds);
 
-#ifdef _DEBUG
+#if USE_DEBUG
     cl_testblend = Cvar_Get("cl_testblend", "0", 0);
     cl_testparticles = Cvar_Get("cl_testparticles", "0", 0);
     cl_testentities = Cvar_Get("cl_testentities", "0", 0);
-#if USE_DLIGHTS
     cl_testlights = Cvar_Get("cl_testlights", "0", CVAR_CHEAT);
-#endif
+    cl_testdebuglines = Cvar_Get("cl_testdebuglines", "0", CVAR_CHEAT);
 
     cl_stats = Cvar_Get("cl_stats", "0", 0);
 #endif
 
-#if USE_DLIGHTS
     cl_add_lights = Cvar_Get("cl_lights", "1", 0);
 	cl_show_lights = Cvar_Get("cl_show_lights", "0", 0);
-#endif
+    cl_flashlight = Cvar_Get("cl_flashlight", "0", 0);
+    cl_flashlight_intensity = Cvar_Get("cl_flashlight_intensity", "20000", CVAR_ARCHIVE);
+    if(cls.ref_type == REF_TYPE_VKPT)
+        flashlight_profile_tex = R_RegisterImage("flashlight_profile", IT_PIC, IF_PERMANENT | IF_BILERP);
+    else
+        flashlight_profile_tex = -1;
     cl_add_particles = Cvar_Get("cl_particles", "1", 0);
     cl_add_entities = Cvar_Get("cl_entities", "1", 0);
     cl_add_blend = Cvar_Get("cl_blend", "1", 0);
     cl_add_blend->changed = cl_add_blend_changed;
+
+    cl_flashlight_offset = Cvar_Get("cl_flashlight_offset", "10 -10 32", 0);
+    cl_flashlight_offset->changed = cl_flashlight_offset_changed;
+    cl_flashlight_offset_changed(cl_flashlight_offset);
 
     cl_adjustfov = Cvar_Get("cl_adjustfov", "1", 0);
 }
 
 void V_Shutdown(void)
 {
+    if(flashlight_profile_tex != -1)
+        R_UnregisterImage(flashlight_profile_tex);
     Cmd_Deregister(v_cmds);
 }
 

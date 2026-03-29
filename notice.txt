@@ -1,5 +1,5 @@
   Quake II RTX
-  Copyright (C) 2019, NVIDIA CORPORATION
+  Copyright (C) 2019-2025, NVIDIA CORPORATION
   All rights reserved.
 
   https://github.com/NVIDIA/Q2RTX
@@ -29,12 +29,12 @@ purposes only.
     https://github.com/id-Software/Quake-2
 
 * Q2PRO
-    Copyright © 2003-2011 Andrey Nazarov
+    Copyright (C) 2003-2011 Andrey Nazarov
     licensed under the terms of the GPLv2.
     https://github.com/skullernet/q2pro
 
 * Q2VKPT
-    Copyright © 2018 Christoph Schied
+    Copyright (C) 2018 Christoph Schied
     licensed under the terms of the GPLv2.
     https://github.com/cschied/q2vkpt
 
@@ -47,11 +47,36 @@ purposes only.
     https://www.moddb.com/mods/quake-2-xp
     used with permission from Arthur Galaktionov
 
-* Quake2MaX "A Modscape Production"
-    http://quake2max.planetquake.gamespy.com
-    Textures from Quake2Max used in Quake2XP.
-    Copyright © 2019 D Scott Boyce. All Rights Reserved.
-    Subject to Creative Commons license version 1.0,
+* Quake II textures and derivative works
+    Copyright (c) 2019 id Software LLC, a ZeniMax Media company
+    All Rights Reserved.    
+
+* FidelityFX Super Resolution 1.0 (FSR) Shader and Sample Code
+    Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+    Licensed under the terms of the "MIT" or "Expat" license, see below.
+    https://github.com/GPUOpen-Effects/FidelityFX-CAS
 
 Roughness and specular channels were adjusted in texture maps to work with
 the Quake II RTX engine.
+
+FidelityFX Super Resolution 1.0 (FSR) License Notice
+----------------------------------------------------
+Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

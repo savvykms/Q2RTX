@@ -21,6 +21,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 //
 
 #include "client.h"
+#include "common/intreadwrite.h"
 #include "server/mvd/protocol.h"
 
 static byte     gtv_recv_buffer[MAX_GTC_MSGLEN];
@@ -39,67 +40,70 @@ static void build_gamestate(void)
     MSG_PackPlayer(&cls.gtv.ps, &cl.frame.ps);
 
     // set base entity states
-    for (i = 1; i < MAX_EDICTS; i++) {
+    for (i = 1; i < cl.csr.max_edicts; i++) {
         ent = &cl_entities[i];
 
         if (ent->serverframe != cl.frame.number) {
             continue;
         }
 
-        MSG_PackEntity(&cls.gtv.entities[i], &ent->current, qfalse);
+        CL_PackEntity(&cls.gtv.entities[i], &ent->current);
     }
+
+    // set protocol flags
+    cls.gtv.esFlags = MSG_ES_UMASK;
+    if (cl.csr.extended)
+        cls.gtv.esFlags |= MSG_ES_EXTENSIONS;
 }
 
 static void emit_gamestate(void)
 {
     char        *string;
-    int         i, j;
     entity_packed_t *es;
     size_t      length;
-    int         flags;
+    int         i, flags;
 
     // send the serverdata
-    MSG_WriteByte(mvd_serverdata | (MVF_SINGLEPOV << SVCMD_BITS));
+    flags = MVF_SINGLEPOV;
+    if (cl.csr.extended)
+        flags |= MVF_EXTLIMITS;
+    MSG_WriteByte(mvd_serverdata | (flags << SVCMD_BITS));
     MSG_WriteLong(PROTOCOL_VERSION_MVD);
-    MSG_WriteShort(PROTOCOL_VERSION_MVD_CURRENT);
+    if (cl.csr.extended)
+        MSG_WriteShort(PROTOCOL_VERSION_MVD_CURRENT);
+    else
+        MSG_WriteShort(PROTOCOL_VERSION_MVD_DEFAULT);
     MSG_WriteLong(cl.servercount);
     MSG_WriteString(cl.gamedir);
     MSG_WriteShort(-1);
 
     // send configstrings
-    for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
+    for (i = 0; i < cl.csr.end; i++) {
         string = cl.configstrings[i];
         if (!string[0]) {
             continue;
         }
-        length = strlen(string);
-        if (length > MAX_QPATH) {
-            length = MAX_QPATH;
-        }
-
+        length = Q_strnlen(string, MAX_QPATH);
         MSG_WriteShort(i);
         MSG_WriteData(string, length);
         MSG_WriteByte(0);
     }
-    MSG_WriteShort(MAX_CONFIGSTRINGS);
+    MSG_WriteShort(i);
 
     // send portal bits
     MSG_WriteByte(0);
 
     // send player state
     MSG_WriteDeltaPlayerstate_Packet(NULL, &cls.gtv.ps,
-                                     cl.clientNum, MSG_PS_FORCE);
+                                     cl.clientNum, cl.psFlags | MSG_PS_FORCE);
     MSG_WriteByte(CLIENTNUM_NONE);
 
     // send entity states
-    for (i = 1, es = cls.gtv.entities + 1; i < MAX_EDICTS; i++, es++) {
-        flags = MSG_ES_UMASK;
-        if ((j = es->number) == 0) {
-            flags |= MSG_ES_REMOVE;
+    for (i = 1, es = cls.gtv.entities + 1; i < cl.csr.max_edicts; i++, es++) {
+        if (!es->number) {
+            continue;
         }
-        es->number = i;
-        MSG_WriteDeltaEntity(NULL, es, flags);
-        es->number = j;
+        MSG_WriteDeltaEntity(NULL, es, cls.gtv.esFlags);
     }
     MSG_WriteShort(0);
 }
@@ -109,7 +113,8 @@ void CL_GTV_EmitFrame(void)
     player_packed_t newps;
     entity_packed_t *oldes, newes;
     centity_t *ent;
-    int i, flags;
+    msgEsFlags_t flags;
+    int i;
 
     if (cls.gtv.state != ca_active)
         return;
@@ -129,7 +134,7 @@ void CL_GTV_EmitFrame(void)
     MSG_PackPlayer(&newps, &cl.frame.ps);
 
     MSG_WriteDeltaPlayerstate_Packet(&cls.gtv.ps, &newps,
-                                     cl.clientNum, MSG_PS_FORCE);
+                                     cl.clientNum, cl.psFlags | MSG_PS_FORCE);
 
     // shuffle current state to previous
     cls.gtv.ps = newps;
@@ -137,7 +142,7 @@ void CL_GTV_EmitFrame(void)
     MSG_WriteByte(CLIENTNUM_NONE);      // end of packetplayers
 
     // send entity states
-    for (i = 1; i < MAX_EDICTS; i++) {
+    for (i = 1; i < cl.csr.max_edicts; i++) {
         oldes = &cls.gtv.entities[i];
         ent = &cl_entities[i];
 
@@ -151,7 +156,7 @@ void CL_GTV_EmitFrame(void)
         }
 
         // calculate flags
-        flags = MSG_ES_UMASK;
+        flags = cls.gtv.esFlags;
 
         if (!oldes->number) {
             // this is a new entity, send it from the last state
@@ -159,7 +164,7 @@ void CL_GTV_EmitFrame(void)
         }
 
         // quantize
-        MSG_PackEntity(&newes, &ent->current, qfalse);
+        CL_PackEntity(&newes, &ent->current);
 
         MSG_WriteDeltaEntity(oldes, &newes, flags);
 
@@ -204,10 +209,8 @@ static void write_stream(void *data, size_t len)
 static void write_message(gtv_serverop_t op)
 {
     byte header[3];
-    size_t len = msg_write.cursize + 1;
 
-    header[0] = len & 255;
-    header[1] = (len >> 8) & 255;
+    WL16(header, msg_write.cursize + 1);
     header[2] = op;
     write_stream(header, sizeof(header));
 
@@ -278,7 +281,6 @@ void CL_GTV_Suspend(void)
 void CL_GTV_Transmit(void)
 {
     byte header[3];
-    size_t total;
 
     if (cls.gtv.state != ca_active)
         return;
@@ -298,9 +300,7 @@ void CL_GTV_Transmit(void)
         return;
 
     // build message header
-    total = cls.gtv.message.cursize + 1;
-    header[0] = total & 255;
-    header[1] = (total >> 8) & 255;
+    WL16(header, cls.gtv.message.cursize + 1);
     header[2] = GTS_STREAM_DATA;
 
     // send frame to client
@@ -406,52 +406,52 @@ static void parse_stream_stop(void)
     write_message(GTS_STREAM_STOP);
 }
 
-static qboolean parse_message(void)
+static bool parse_message(void)
 {
     uint32_t magic;
     uint16_t msglen;
     int cmd;
 
     if (cls.gtv.state <= ca_disconnected) {
-        return qfalse;
+        return false;
     }
 
     // check magic
     if (cls.gtv.state < ca_connected) {
         if (!FIFO_TryRead(&cls.gtv.stream.recv, &magic, 4)) {
-            return qfalse;
+            return false;
         }
         if (magic != MVD_MAGIC) {
             drop_client("not a MVD/GTV stream");
-            return qfalse;
+            return false;
         }
         cls.gtv.state = ca_connected;
 
         // send it back
         write_stream(&magic, 4);
-        return qfalse;
+        return false;
     }
 
     // parse msglen
     if (!cls.gtv.msglen) {
         if (!FIFO_TryRead(&cls.gtv.stream.recv, &msglen, 2)) {
-            return qfalse;
+            return false;
         }
         msglen = LittleShort(msglen);
         if (!msglen) {
             drop_client("end of stream");
-            return qfalse;
+            return false;
         }
         if (msglen > MAX_GTC_MSGLEN) {
             drop_client("oversize message");
-            return qfalse;
+            return false;
         }
         cls.gtv.msglen = msglen;
     }
 
     // read this message
     if (!FIFO_ReadMessage(&cls.gtv.stream.recv, cls.gtv.msglen)) {
-        return qfalse;
+        return false;
     }
 
     cls.gtv.msglen = 0;
@@ -474,15 +474,15 @@ static qboolean parse_message(void)
         break;
     default:
         drop_client("unknown command byte");
-        return qfalse;
+        return false;
     }
 
     if (msg_read.readcount > msg_read.cursize) {
         drop_client("read past end of message");
-        return qfalse;
+        return false;
     }
 
-    return qtrue;
+    return true;
 }
 
 void CL_GTV_Run(void)
@@ -535,12 +535,12 @@ static void CL_GTV_Start_f(void)
         return;
     }
 
-    ret = NET_Listen(qtrue);
+    ret = NET_Listen(true);
     if (ret == NET_OK) {
         Com_Printf("Listening for GTV connections.\n");
         cls.gtv.state = ca_disconnected;
     } else if (ret == NET_ERROR) {
-        Com_EPrintf("%s while opening client TCP port.\n", NET_ErrorString());
+        Com_EPrintf("Error opening client TCP port.\n");
     } else {
         Com_EPrintf("Client TCP port already in use.\n");
     }
@@ -553,7 +553,7 @@ static void CL_GTV_Stop_f(void)
         return;
     }
 
-    NET_Listen(qfalse);
+    NET_Listen(false);
 
     write_message(GTS_DISCONNECT);
     drop_client(NULL);
@@ -577,11 +577,37 @@ static void CL_GTV_Status_f(void)
                NET_AdrToString(&cls.gtv.stream.address), cls.gtv.state);
 }
 
+static void CL_GTV_Cmd_g(genctx_t *ctx, int argnum)
+{
+    if (argnum == 1) {
+        Prompt_AddMatch(ctx, "start");
+        Prompt_AddMatch(ctx, "stop");
+        Prompt_AddMatch(ctx, "status");
+    }
+}
+
+static void CL_GTV_Cmd_f(void)
+{
+    const char *cmd = Cmd_Argv(1);
+
+    if (!strcmp(cmd, "start"))
+        CL_GTV_Start_f();
+    else if (!strcmp(cmd, "stop"))
+        CL_GTV_Stop_f();
+    else if (!strcmp(cmd, "status"))
+        CL_GTV_Status_f();
+    else
+        Com_Printf("Usage: %s <start|stop|status>\n", Cmd_Argv(0));
+}
+
+static const cmdreg_t c_gtv[] = {
+    { "gtv", CL_GTV_Cmd_f, CL_GTV_Cmd_g },
+    { NULL }
+};
+
 void CL_GTV_Init(void)
 {
-    Cmd_AddCommand("client_gtv_start", CL_GTV_Start_f);
-    Cmd_AddCommand("client_gtv_stop", CL_GTV_Stop_f);
-    Cmd_AddCommand("client_gtv_status", CL_GTV_Status_f);
+    Cmd_Register(c_gtv);
 }
 
 void CL_GTV_Shutdown(void)

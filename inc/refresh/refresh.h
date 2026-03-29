@@ -17,14 +17,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef REFRESH_H
-#define REFRESH_H
+#pragma once
 
 #include "common/cvar.h"
 #include "common/error.h"
 
 #define MAX_DLIGHTS     32
-#define MAX_ENTITIES    1024     // == MAX_PACKET_ENTITIES * 2
+#define MAX_ENTITIES    2048
 #define MAX_PARTICLES   16384
 #define MAX_LIGHTSTYLES 256
 
@@ -48,12 +47,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define SHELL_WHITE_COLOR   0xD7
 
-// NOTE: these flags are intentionally the same value
-#define RF_LEFTHAND         0x80000000
-#define RF_NOSHADOW         0x80000000
-
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
-                             RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM)
+                             RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)
 
 #define DLIGHT_CUTOFF       64
 
@@ -93,6 +88,18 @@ typedef struct entity_s {
 	float scale;
 } entity_t;
 
+typedef enum dlight_type_e
+{
+    DLIGHT_SPHERE = 0,
+    DLIGHT_SPOT
+} dlight_type;
+
+typedef enum dlight_spot_emission_profile_e
+{
+    DLIGHT_SPOT_EMISSION_PROFILE_FALLOFF = 0,
+    DLIGHT_SPOT_EMISSION_PROFILE_AXIS_ANGLE_TEXTURE
+} dlight_spot_emission_profile;
+
 typedef struct dlight_s {
     vec3_t  origin;
 #if USE_REF == REF_GL
@@ -101,6 +108,32 @@ typedef struct dlight_s {
     vec3_t  color;
     float   intensity;
 	float   radius;
+
+    // VKPT light types support
+    dlight_type light_type;
+    // Spotlight options
+    struct {
+        // Spotlight emission profile
+        dlight_spot_emission_profile emission_profile;
+        // Spotlight direction
+        vec3_t  direction;
+        union {
+            // Options for DLIGHT_SPOT_EMISSION_PROFILE_FALLOFF
+            struct {
+                // Cosine of angle of spotlight cone width (no emission beyond that)
+                float   cos_total_width;
+                // Cosine of angle of start of falloff (full emission below that)
+                float   cos_falloff_start;
+            };
+            // Options for DLIGHT_SPOT_EMISSION_PROFILE_AXIS_ANGLE_TEXTURE
+            struct {
+                // Angle of spotlight cone width (no emission beyond that), in radians
+                float   total_width;
+                // Emission profile texture, indexed by 'angle / total_width'
+                qhandle_t texture;
+            };
+        };
+    } spot;
 } dlight_t;
 
 typedef struct particle_s {
@@ -114,7 +147,6 @@ typedef struct particle_s {
 
 typedef struct lightstyle_s {
     float           white;          // highest of RGB
-    vec3_t          rgb;            // 0.0 - 2.0
 } lightstyle_t;
 
 #ifdef USE_SMALL_GPU
@@ -139,8 +171,10 @@ typedef struct ref_feedback_s {
 
 	char        view_material[MAX_QPATH];
 	char        view_material_override[MAX_QPATH];
+    int         view_material_index;
 
 	vec3_t      hdr_color;
+	float       adapted_luminance;
 } ref_feedback_t;
 
 typedef struct refdef_s {
@@ -172,11 +206,17 @@ typedef struct refdef_s {
 	ref_feedback_t feedback;
 } refdef_t;
 
+typedef struct {
+    int     colorbits;
+    int     depthbits;
+    int     stencilbits;
+    int     multisamples;
+    bool    debug;
+} r_opengl_config_t;
+
 typedef enum {
-    QVF_ACCELERATED     = (1 << 0),
-    QVF_GAMMARAMP       = (1 << 1),
-    QVF_FULLSCREEN      = (1 << 2),
-    QVF_VIDEOSYNC       = (1 << 3)
+    QVF_FULLSCREEN      = BIT(0),
+    QVF_GAMMARAMP       = BIT(1),
 } vidFlags_t;
 
 typedef struct {
@@ -193,17 +233,29 @@ typedef struct {
 
 typedef enum {
     IF_NONE         = 0,
-    IF_PERMANENT    = (1 << 0),
-    IF_TRANSPARENT  = (1 << 1),
-    IF_PALETTED     = (1 << 2),
-    IF_UPSCALED     = (1 << 3),
-    IF_SCRAP        = (1 << 4),
-    IF_TURBULENT    = (1 << 5),
-    IF_REPEAT       = (1 << 6),
-    IF_NEAREST      = (1 << 7),
-    IF_OPAQUE       = (1 << 8),
-	IF_SRGB         = (1 << 9)
+    IF_PERMANENT    = BIT(0),
+    IF_TRANSPARENT  = BIT(1),
+    IF_PALETTED     = BIT(2),
+    IF_UPSCALED     = BIT(3),
+    IF_SCRAP        = BIT(4),
+    IF_TURBULENT    = BIT(5),
+    IF_REPEAT       = BIT(6),
+    IF_NEAREST      = BIT(7),
+    IF_OPAQUE       = BIT(8),
+    IF_SRGB         = BIT(9),
+    IF_FAKE_EMISSIVE= BIT(10),
+    IF_EXACT        = BIT(11),
+    IF_NORMAL_MAP   = BIT(12),
+    IF_BILERP       = BIT(13), // always lerp, independent of bilerp_pics cvar
+
+    // Image source indicator/requirement flags
+    IF_SRC_BASE     = (0x1 << 16),
+    IF_SRC_GAME     = (0x2 << 16),
+    IF_SRC_MASK     = (0x3 << 16),
 } imageflags_t;
+
+// Shift amount for storing fake emissive synthesis threshold
+#define IF_FAKE_EMISSIVE_THRESH_SHIFT  20
 
 typedef enum {
     IT_PIC,
@@ -216,11 +268,18 @@ typedef enum {
     IT_MAX
 } imagetype_t;
 
+typedef enum ref_type_e
+{
+    REF_TYPE_NONE = 0,
+    REF_TYPE_GL,
+    REF_TYPE_VKPT
+} ref_type_t;
+
 // called when the library is loaded
-extern qboolean    (*R_Init)(qboolean total);
+extern ref_type_t  (*R_Init)(bool total);
 
 // called before the library is unloaded
-extern void        (*R_Shutdown)(qboolean total);
+extern void        (*R_Shutdown)(bool total);
 
 // All data that will be used in a level should be
 // registered before rendering any frames to prevent disk hits,
@@ -238,21 +297,22 @@ extern void        (*R_Shutdown)(qboolean total);
 extern void    (*R_BeginRegistration)(const char *map);
 qhandle_t R_RegisterModel(const char *name);
 qhandle_t R_RegisterImage(const char *name, imagetype_t type,
-                          imageflags_t flags, qerror_t *err_p);
+                          imageflags_t flags);
 qhandle_t R_RegisterRawImage(const char *name, int width, int height, byte* pic, imagetype_t type,
                           imageflags_t flags);
 void R_UnregisterImage(qhandle_t handle);
 
-extern void    (*R_SetSky)(const char *name, float rotate, vec3_t axis);
+extern void    (*R_SetSky)(const char *name, float rotate, int autorotate, const vec3_t axis);
 extern void    (*R_EndRegistration)(void);
 
-#define R_RegisterPic(name)     R_RegisterImage(name, IT_PIC, IF_PERMANENT | IF_SRGB, NULL)
-#define R_RegisterPic2(name)    R_RegisterImage(name, IT_PIC, IF_SRGB, NULL)
-#define R_RegisterFont(name)    R_RegisterImage(name, IT_FONT, IF_PERMANENT | IF_SRGB, NULL)
-#define R_RegisterSkin(name)    R_RegisterImage(name, IT_SKIN, IF_SRGB, NULL)
+#define R_RegisterPic(name)     R_RegisterImage(name, IT_PIC, IF_PERMANENT | IF_SRGB)
+#define R_RegisterPic2(name)    R_RegisterImage(name, IT_PIC, IF_SRGB)
+#define R_RegisterFont(name)    R_RegisterImage(name, IT_FONT, IF_PERMANENT | IF_SRGB)
+#define R_RegisterSkin(name)    R_RegisterImage(name, IT_SKIN, IF_SRGB)
+#define R_RegisterSprite(name)  R_RegisterImage(name, IT_SPRITE, IF_SRGB)
 
 extern void    (*R_RenderFrame)(refdef_t *fd);
-extern void    (*R_LightPoint)(vec3_t origin, vec3_t light);
+extern void    (*R_LightPoint)(const vec3_t origin, vec3_t light);
 
 extern void    (*R_ClearColor)(void);
 extern void    (*R_SetAlpha)(float clpha);
@@ -264,28 +324,38 @@ extern void    (*R_SetScale)(float scale);
 extern void    (*R_DrawChar)(int x, int y, int flags, int ch, qhandle_t font);
 extern int     (*R_DrawString)(int x, int y, int flags, size_t maxChars,
                      const char *string, qhandle_t font);  // returns advanced x coord
-qboolean R_GetPicSize(int *w, int *h, qhandle_t pic);   // returns transparency bit
+bool R_GetPicSize(int *w, int *h, qhandle_t pic);   // returns transparency bit
 extern void    (*R_DrawPic)(int x, int y, qhandle_t pic);
 extern void    (*R_DrawStretchPic)(int x, int y, int w, int h, qhandle_t pic);
+extern void    (*R_DrawKeepAspectPic)(int x, int y, int w, int h, qhandle_t pic);
+extern void    (*R_DrawStretchRaw)(int x, int y, int w, int h);
 extern void    (*R_TileClear)(int x, int y, int w, int h, qhandle_t pic);
 extern void    (*R_DrawFill8)(int x, int y, int w, int h, int c);
 extern void    (*R_DrawFill32)(int x, int y, int w, int h, uint32_t color);
+extern void    (*R_UpdateRawPic)(int pic_w, int pic_h, const uint32_t *pic);
+extern void    (*R_DiscardRawPic)(void);
+
+// debug line entry points
+extern bool (*R_SupportsDebugLines)(void);
+extern void (*R_AddDebugText_)(const vec3_t origin, const vec3_t angles, const char *text,
+                               float size, uint32_t color, uint32_t time, bool depth_test);
 
 // video mode and refresh state management entry points
 extern void    (*R_BeginFrame)(void);
 extern void    (*R_EndFrame)(void);
-extern void    (*R_ModeChanged)(int width, int height, int flags, int rowbytes, void *pixels);
+extern void    (*R_ModeChanged)(int width, int height, int flags);
 
 // add decal to ring buffer
 extern void    (*R_AddDecal)(decal_t *d);
 
-extern qboolean (*R_InterceptKey)(unsigned key, qboolean down);
+extern bool    (*R_InterceptKey)(unsigned key, bool down);
+extern bool    (*R_IsHDR)(void);
 
 #if REF_GL
-void R_RegisterFunctionsGL();
+void R_RegisterFunctionsGL(void);
 #endif
 #if REF_VKPT
-void R_RegisterFunctionsRTX();
+void R_RegisterFunctionsRTX(void);
 #endif
 
-#endif // REFRESH_H
+r_opengl_config_t *R_GetGLConfig(void);

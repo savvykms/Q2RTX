@@ -75,7 +75,7 @@ typedef struct {
     int             pingindex;
     int             pingtime;
     int             pingextra;
-    char            *status_c;
+    const char      *status_c;
     char            status_r[32];
 } m_servers_t;
 
@@ -108,10 +108,12 @@ static void UpdateSelection(void)
 
     if (s && s->status == SLOT_VALID && s->numRules && uis.width >= 640) {
         m_servers.info.generic.flags &= ~QMF_HIDDEN;
-        m_servers.info.items = (void **)s->rules;
-        m_servers.info.numItems = s->numRules;
-        m_servers.info.curvalue = -1;
-        m_servers.info.prestep = 0;
+        if (m_servers.info.items != (void **)s->rules || m_servers.info.numItems != s->numRules) {
+            m_servers.info.items = (void **)s->rules;
+            m_servers.info.numItems = s->numRules;
+            m_servers.info.curvalue = -1;
+            m_servers.info.prestep = 0;
+        }
     } else {
         m_servers.info.generic.flags |= QMF_HIDDEN;
         m_servers.info.items = NULL;
@@ -120,10 +122,12 @@ static void UpdateSelection(void)
 
     if (s && s->status == SLOT_VALID && s->numPlayers) {
         m_servers.players.generic.flags &= ~QMF_HIDDEN;
-        m_servers.players.items = (void **)s->players;
-        m_servers.players.numItems = s->numPlayers;
-        m_servers.players.curvalue = -1;
-        m_servers.players.prestep = 0;
+        if (m_servers.players.items != (void **)s->players || m_servers.players.numItems != s->numPlayers) {
+            m_servers.players.items = (void **)s->players;
+            m_servers.players.numItems = s->numPlayers;
+            m_servers.players.curvalue = -1;
+            m_servers.players.prestep = 0;
+        }
     } else {
         m_servers.players.generic.flags |= QMF_HIDDEN;
         m_servers.players.items = NULL;
@@ -182,16 +186,19 @@ static serverslot_t *FindSlot(const netadr_t *search, int *index_p)
     return found;
 }
 
-static uint32_t ColorForStatus(const serverStatus_t *status)
+static uint32_t ColorForStatus(const serverStatus_t *status, unsigned ping)
 {
-    if (atoi(Info_ValueForKey(status->infostring, "needpass")) >= 1)
+    if (Q_atoi(Info_ValueForKey(status->infostring, "needpass")) >= 1)
         return uis.color.disabled.u32;
 
-    if (atoi(Info_ValueForKey(status->infostring, "anticheat")) >= 2)
+    if (Q_atoi(Info_ValueForKey(status->infostring, "anticheat")) >= 2)
         return uis.color.disabled.u32;
 
     if (Q_stricmp(Info_ValueForKey(status->infostring, "NoFake"), "ENABLED") == 0)
         return uis.color.disabled.u32;
+
+    if (ping < 30)
+        return U32_GREEN;
 
     return U32_WHITE;
 }
@@ -206,7 +213,8 @@ A server status response has been received, validated and parsed.
 void UI_StatusEvent(const serverStatus_t *status)
 {
     serverslot_t *slot;
-    char *hostname, *host, *mod, *map, *maxclients;
+    char *hostname;
+    const char *host, *mod, *map, *maxclients;
     unsigned timestamp, ping;
     const char *info = status->infostring;
     char key[MAX_INFO_STRING];
@@ -269,7 +277,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     slot->status = SLOT_VALID;
     slot->address = net_from;
     slot->hostname = hostname;
-    slot->color = ColorForStatus(status);
+    slot->color = ColorForStatus(status, ping);
 
     m_servers.list.items[i] = slot;
 
@@ -389,7 +397,8 @@ static menuSound_t CopyAddress(void)
 
     slot = m_servers.list.items[m_servers.list.curvalue];
 
-    VID_SetClipboardData(slot->hostname);
+    if (vid.set_clipboard_data)
+        vid.set_clipboard_data(slot->hostname);
     return QMS_OUT;
 }
 
@@ -540,13 +549,13 @@ static void ParseAddressBook(void)
 static void ParseMasterArgs(netadr_t *broadcast)
 {
     void *data;
-    ssize_t len;
+    int len;
     void (*parse)(void *, size_t, size_t);
     size_t chunk;
     char *s, *p;
     int i, argc;
 
-    Cmd_TokenizeString(m_servers.args, qfalse);
+    Cmd_TokenizeString(m_servers.args, false);
 
     argc = Cmd_Argc();
     if (!argc) {
@@ -587,13 +596,13 @@ static void ParseMasterArgs(netadr_t *broadcast)
             continue;
         }
 
-        if (!strncmp(s, "http://", 7)) {
+        if (!strncmp(s, "http://", 7) || !strncmp(s, "https://", 8)) {
 #if USE_CURL
-            len = HTTP_FetchFile(s + 7, &data);
+            len = HTTP_FetchFile(s, &data);
             if (len < 0)
                 continue;
             (*parse)(data, len, chunk);
-            Z_Free(data);
+            free(data);
 #else
             Com_Printf("Can't fetch '%s', no HTTP support compiled in.\n", s);
 #endif
@@ -659,14 +668,13 @@ static void FinishPingStage(void)
 static void CalcPingRate(void)
 {
     extern cvar_t *info_rate;
+
+    // don't allow more than 100 packets/sec
     int rate = Cvar_ClampInteger(ui_pingrate, 0, 100);
 
     // assume average 450 bytes per reply packet
     if (!rate)
-        rate = info_rate->integer / 450;
-
-    // don't allow more than 100 packets/sec
-    clamp(rate, 1, 100);
+        rate = Q_clip(info_rate->integer / 450, 1, 100);
 
     // drop rate by stage
     m_servers.pingtime = (1000 * PING_STAGES) / (rate * m_servers.pingstage);
@@ -768,8 +776,8 @@ static int namecmp(serverslot_t *s1, serverslot_t *s2, int col)
 
 static int pingcmp(serverslot_t *s1, serverslot_t *s2)
 {
-    int n1 = atoi(UI_GetColumn(s1->name, COL_RTT));
-    int n2 = atoi(UI_GetColumn(s2->name, COL_RTT));
+    int n1 = Q_atoi(UI_GetColumn(s1->name, COL_RTT));
+    int n2 = Q_atoi(UI_GetColumn(s2->name, COL_RTT));
 
     return (n1 - n2) * m_servers.list.sortdir;
 }
@@ -905,7 +913,7 @@ static void SizeCompact(void)
 //
     m_servers.players.generic.x         = 0;
     m_servers.players.generic.y         = uis.height / 2 + 1;
-    m_servers.players.generic.height    = uis.height / 2 - CHAR_HEIGHT - 2;
+    m_servers.players.generic.height    = (uis.height + 1) / 2 - CHAR_HEIGHT - 2;
 
     m_servers.players.columns[0].width  = 3 * CHAR_WIDTH + MLIST_PADDING;
     m_servers.players.columns[1].width  = 3 * CHAR_WIDTH + MLIST_PADDING;
@@ -936,7 +944,7 @@ static void SizeFull(void)
 //
     m_servers.info.generic.x            = 0;
     m_servers.info.generic.y            = uis.height / 2 + 1;
-    m_servers.info.generic.height       = uis.height / 2 - CHAR_HEIGHT - 2;
+    m_servers.info.generic.height       = (uis.height + 1) / 2 - CHAR_HEIGHT - 2;
 
     m_servers.info.columns[0].width     = w / 3;
     m_servers.info.columns[1].width     = w - w / 3;
@@ -1035,20 +1043,17 @@ static void Draw(menuFrameWork_t *self)
     DrawStatus();
 }
 
-static qboolean Push(menuFrameWork_t *self)
+static bool Push(menuFrameWork_t *self)
 {
     // save our arguments for refreshing
-    m_servers.args = UI_CopyString(Cmd_RawArgsFrom(2));
-    return qtrue;
+    m_servers.args = UI_CopyString(COM_StripQuotes(Cmd_RawArgsFrom(2)));
+    return true;
 }
 
 static void Pop(menuFrameWork_t *self)
 {
     ClearServers();
-    if (m_servers.args) {
-        Z_Free(m_servers.args);
-        m_servers.args = NULL;
-    }
+    Z_Freep((void**)&m_servers.args);
 }
 
 static void Expose(menuFrameWork_t *self)
@@ -1059,6 +1064,7 @@ static void Expose(menuFrameWork_t *self)
 
 static void Free(menuFrameWork_t *self)
 {
+    Z_Free(m_servers.menu.items);
     memset(&m_servers, 0, sizeof(m_servers));
 }
 

@@ -16,8 +16,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef SOUND_H
-#define SOUND_H
+#pragma once
 
 void S_Init(void);
 void S_Shutdown(void);
@@ -27,7 +26,7 @@ void S_StartSound(const vec3_t origin, int entnum, int entchannel,
                   qhandle_t sfx, float fvol, float attenuation, float timeofs);
 void S_ParseStartSound(void);
 void S_StartLocalSound(const char *s);
-void S_StartLocalSound_(const char *s);
+void S_StartLocalSoundOnce(const char *s);
 
 void S_FreeAllSounds(void);
 void S_StopAllSounds(void);
@@ -39,10 +38,16 @@ void S_BeginRegistration(void);
 qhandle_t S_RegisterSound(const char *sample);
 void S_EndRegistration(void);
 
-void S_RawSamples(int samples, int rate, int width,
-		int channels, byte *data, float volume);
+void OGG_Play(void);
+void OGG_Stop(void);
+void OGG_Update(void);
+void OGG_LoadTrackList(void);
+void OGG_Init(void);
+void OGG_Shutdown(void);
+void OGG_RecoverState(void);
+void OGG_SaveState(void);
 
-void S_UnqueueRawSamples();
+void S_RawSamples(int samples, int rate, int width, int channels, const byte *data);
 
 float S_GetLinearVolume(float perceptual);
 
@@ -58,10 +63,8 @@ typedef enum {
 
 extern sndstarted_t s_started;
 
-extern  vec3_t  listener_origin;
-extern  vec3_t  listener_forward;
-extern  vec3_t  listener_right;
-extern  vec3_t  listener_up;
-extern  int     listener_entnum;
-
-#endif // SOUND_H
+extern vec3_t   listener_origin;
+extern vec3_t   listener_forward;
+extern vec3_t   listener_right;
+extern vec3_t   listener_up;
+extern int      listener_entnum;

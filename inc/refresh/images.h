@@ -18,8 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef IMAGES_H
-#define IMAGES_H
+#pragma once
 
 //
 // images.h -- common image manager
@@ -42,19 +41,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define IMG_FreePixels(x)   Z_Free(x)
 #endif
 
-#if USE_REF == REF_SOFT
-#define MIPSIZE(c) ((c) * (256 + 64 + 16 + 4) / 256)
-#else
-#define MIPSIZE(c) (c)
-#endif
-
 #define LUMINANCE(r, g, b) ((r) * 0.2126f + (g) * 0.7152f + (b) * 0.0722f)
 
 #define U32_ALPHA   MakeColor(  0,   0,   0, 255)
 #define U32_RGB     MakeColor(255, 255, 255,   0)
 
 // absolute limit for OpenGL renderer
-#define MAX_TEXTURE_SIZE            2048
+#define MAX_TEXTURE_SIZE    4096
 
 typedef enum {
     IM_PCX,
@@ -65,14 +58,21 @@ typedef enum {
     IM_MAX
 } imageformat_t;
 
+// Format of data in image_t.pix_data
+typedef enum
+{
+    PF_R8G8B8A8_UNORM = 0,
+    PF_R16_UNORM
+} pixelformat_t;
+
 typedef struct image_s {
     list_t          entry;
     char            name[MAX_QPATH]; // game path
     int             baselen; // without extension
     imagetype_t     type;
     imageflags_t    flags;
-    int             width, height; // source image
-    int             upload_width, upload_height; // after power of two and picmip
+    int16_t         width, height; // source image
+    int16_t         upload_width, upload_height; // after power of two and picmip
     int             registration_sequence; // 0 = free
 	char            filepath[MAX_QPATH]; // actual path loaded, with correct format extension
 	int             is_srgb;
@@ -81,19 +81,21 @@ typedef struct image_s {
     unsigned        texnum; // gl texture binding
     float           sl, sh, tl, th;
 #endif
+    float           aspect;
 #if REF_VKPT
     byte            *pix_data; // todo: add miplevels
+    pixelformat_t   pixel_format; // pixel format (only supported by VKPT renderer)
     vec3_t          light_color; // use this color if this is a light source
 	vec2_t          min_light_texcoord;
 	vec2_t          max_light_texcoord;
-	qboolean        entire_texture_emissive;
-	qboolean        processing_complete;
+	bool            entire_texture_emissive;
+	bool            processing_complete;
 #else
     byte            *pixels[4]; // mip levels
 #endif
 } image_t;
 
-#define MAX_RIMAGES     2048
+#define MAX_RIMAGES     8192
 
 extern image_t  r_images[MAX_RIMAGES];
 extern int      r_numImages;
@@ -105,8 +107,10 @@ extern int registration_sequence;
 extern uint32_t d_8to24table[256];
 
 // these are implemented in src/refresh/images.c
-void IMG_ReloadAll();
+void IMG_ReloadAll(void);
 image_t *IMG_Find(const char *name, imagetype_t type, imageflags_t flags);
+image_t *IMG_FindExisting(const char *name, imagetype_t type);
+image_t *IMG_Clone(image_t *image, const char* new_name);
 void IMG_FreeUnused(void);
 void IMG_FreeAll(void);
 void IMG_Init(void);
@@ -115,6 +119,8 @@ void IMG_GetPalette(void);
 
 image_t *IMG_ForHandle(qhandle_t h);
 
+int IMG_GetDimensions(const char* name, int16_t* width, int16_t* height);
+
 void IMG_ResampleTexture(const byte *in, int inwidth, int inheight,
                          byte *out, int outwidth, int outheight);
 void IMG_MipMap(byte *out, byte *in, int width, int height);
@@ -122,8 +128,21 @@ void IMG_MipMap(byte *out, byte *in, int width, int height);
 // these are implemented in src/refresh/[gl,sw]/images.c
 extern void (*IMG_Unload)(image_t *image);
 extern void (*IMG_Load)(image_t *image, byte *pic);
-extern byte* (*IMG_ReadPixels)(int *width, int *height, int *rowbytes);
 
-#endif // IMAGES_H
+struct screenshot_s;
+
+typedef int (*save_cb_t)(struct screenshot_s *restrict);
+
+typedef struct screenshot_s {
+    save_cb_t save_cb;
+    byte *pixels;
+    FILE *fp;
+    char *filename;
+    int width, height, rowbytes, bpp, status, param;
+    bool async;
+} screenshot_t;
+
+extern void (*IMG_ReadPixels)(screenshot_t *s);
+extern void (*IMG_ReadPixelsHDR)(screenshot_t *s);
 
 /* vim: set ts=8 sw=4 tw=0 et : */

@@ -16,53 +16,63 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef SYSTEM_H
-#define SYSTEM_H
+#pragma once
 
 #include "common/utils.h"
+
+typedef struct {
+    const char  *filter;
+    unsigned    flags;
+    unsigned    baselen;
+    void        **files;
+    int         count;
+} listfiles_t;
 
 // loads the dll and returns entry pointer
 void    *Sys_LoadLibrary(const char *path, const char *sym, void **handle);
 void    Sys_FreeLibrary(void *handle);
 void    *Sys_GetProcAddress(void *handle, const char *sym);
 
-unsigned    Sys_Milliseconds(void);
-void    Sys_Sleep(int msec);
-qboolean Sys_IsDir(const char *path);
-qboolean Sys_IsFile(const char *path);
+unsigned Sys_Milliseconds(void);
+void     Sys_Sleep(int msec);
 
 void    Sys_Init(void);
 void    Sys_AddDefaultConfig(void);
 
+const char  *Sys_ErrorString(int err);
+
 #if USE_SYSCON
 void    Sys_RunConsole(void);
-void    Sys_ConsoleOutput(const char *string);
+void    Sys_ConsoleOutput(const char *text, size_t len);
 void    Sys_SetConsoleTitle(const char *title);
 void    Sys_SetConsoleColor(color_index_t color);
 void    Sys_Printf(const char *fmt, ...) q_printf(1, 2);
 #else
-#define Sys_RunConsole()            (void)0
-#define Sys_ConsoleOutput(string)   (void)0
-#define Sys_SetConsoleTitle(title)  (void)0
-#define Sys_SetConsoleColor(color)  (void)0
-#define Sys_Printf(...)             (void)0
+#define Sys_RunConsole()                (void)0
+#define Sys_ConsoleOutput(text, len)    (void)0
+#define Sys_SetConsoleTitle(title)      (void)0
+#define Sys_SetConsoleColor(color)      (void)0
+#define Sys_Printf(...)                 (void)0
 #endif
 
 void    Sys_Error(const char *error, ...) q_noreturn q_printf(1, 2);
 void    Sys_Quit(void) q_noreturn;
 
-void    Sys_ListFiles_r(const char *path, const char *filter,
-                        unsigned flags, size_t baselen, int *count_p, void **files, int depth);
+void    Sys_ListFiles_r(listfiles_t *list, const char *path, int depth);
+bool    Sys_IsDir(const char *path);
+bool    Sys_IsFile(const char *path);
 
 void    Sys_DebugBreak(void);
 
 #if USE_AC_CLIENT
-qboolean Sys_GetAntiCheatAPI(void);
+bool Sys_GetAntiCheatAPI(void);
+#endif
+
+#ifndef _WIN32
+bool Sys_SetNonBlock(int fd, bool nb);
 #endif
 
 extern cvar_t   *sys_basedir;
 extern cvar_t   *sys_libdir;
 extern cvar_t   *sys_homedir;
 extern cvar_t   *sys_forcegamelib;
-
-#endif // SYSTEM_H

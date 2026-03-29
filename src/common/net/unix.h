@@ -26,7 +26,7 @@ static const char *os_error_string(int err)
 }
 
 // returns true if failed socket operation should be retried.
-static qboolean process_error_queue(qsocket_t sock, const netadr_t *to)
+static bool process_error_queue(qsocket_t sock, const netadr_t *to)
 {
 #ifdef IP_RECVERR
     byte buffer[1024];
@@ -36,7 +36,7 @@ static qboolean process_error_queue(qsocket_t sock, const netadr_t *to)
     struct sock_extended_err *ee;
     netadr_t from;
     int tries;
-    qboolean found = qfalse;
+    bool found = false;
 
     for (tries = 0; tries < MAX_ERROR_RETRIES; tries++) {
         memset(&from_addr, 0, sizeof(from_addr));
@@ -89,25 +89,25 @@ static qboolean process_error_queue(qsocket_t sock, const netadr_t *to)
             (from.port == 0 || from.port == to->port)) {
             Com_DPrintf("%s: found offending address: %s\n", __func__,
                         NET_AdrToString(&from));
-            found = qtrue;
+            found = true;
         }
 
         // handle ICMP error
         NET_ErrorEvent(sock, &from, ee->ee_errno, ee->ee_info);
     }
 
-    return !!tries && !found;
+    return tries && !found;
 #else
-    return qfalse;
+    return false;
 #endif
 }
 
-static ssize_t os_udp_recv(qsocket_t sock, void *data,
-                           size_t len, netadr_t *from)
+static int os_udp_recv(qsocket_t sock, void *data,
+                       size_t len, netadr_t *from)
 {
     struct sockaddr_storage addr;
     socklen_t addrlen;
-    ssize_t ret;
+    int ret;
     int tries;
 
     for (tries = 0; tries < MAX_ERROR_RETRIES; tries++) {
@@ -134,12 +134,12 @@ static ssize_t os_udp_recv(qsocket_t sock, void *data,
     return NET_ERROR;
 }
 
-static ssize_t os_udp_send(qsocket_t sock, const void *data,
-                           size_t len, const netadr_t *to)
+static int os_udp_send(qsocket_t sock, const void *data,
+                       size_t len, const netadr_t *to)
 {
     struct sockaddr_storage addr;
     socklen_t addrlen;
-    ssize_t ret;
+    int ret;
     int tries;
 
     addrlen = NET_NetadrToSockadr(to, &addr);
@@ -172,9 +172,9 @@ static neterr_t os_get_error(void)
     return NET_ERROR;
 }
 
-static ssize_t os_recv(qsocket_t sock, void *data, size_t len, int flags)
+static int os_recv(qsocket_t sock, void *data, size_t len, int flags)
 {
-    ssize_t ret = recv(sock, data, len, flags);
+    int ret = recv(sock, data, len, flags);
 
     if (ret == -1)
         return os_get_error();
@@ -182,9 +182,9 @@ static ssize_t os_recv(qsocket_t sock, void *data, size_t len, int flags)
     return ret;
 }
 
-static ssize_t os_send(qsocket_t sock, const void *data, size_t len, int flags)
+static int os_send(qsocket_t sock, const void *data, size_t len, int flags)
 {
-    ssize_t ret = send(sock, data, len, flags);
+    int ret = send(sock, data, len, flags);
 
     if (ret == -1)
         return os_get_error();
@@ -316,37 +316,9 @@ static qsocket_t os_socket(int domain, int type, int protocol)
     return s;
 }
 
-static ioentry_t *_os_get_io(qsocket_t fd, const char *func)
+static int os_poll(struct pollfd *fds, int nfds, int timeout)
 {
-    if (fd < 0 || fd >= FD_SETSIZE)
-        Com_Error(ERR_FATAL, "%s: fd out of range: %d", func, fd);
-
-    return &io_entries[fd];
-}
-
-static ioentry_t *os_add_io(qsocket_t fd)
-{
-    if (fd >= io_numfds) {
-        io_numfds = fd + 1;
-    }
-
-    return _os_get_io(fd, __func__);
-}
-
-static ioentry_t *os_get_io(qsocket_t fd)
-{
-    return _os_get_io(fd, __func__);
-}
-
-static qsocket_t os_get_fd(ioentry_t *e)
-{
-    return e - io_entries;
-}
-
-static int os_select(int nfds, fd_set *rfds, fd_set *wfds,
-                     fd_set *efds, struct timeval *tv)
-{
-    int ret = select(nfds, rfds, wfds, efds, tv);
+    int ret = poll(fds, nfds, timeout);
 
     if (ret == -1) {
         net_error = errno;
@@ -355,6 +327,11 @@ static int os_select(int nfds, fd_set *rfds, fd_set *wfds,
     }
 
     return ret;
+}
+
+static neterr_t os_connect_hack(struct pollfd *e)
+{
+    return NET_OK;
 }
 
 static void os_net_init(void)

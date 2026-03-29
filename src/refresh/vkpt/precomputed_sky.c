@@ -102,8 +102,6 @@ float terrain_shadowmap_viewproj[16] = { 0.f };
 
 VkResult UploadImage(void* FirstPixel, size_t total_size, unsigned int Width, unsigned int Height, unsigned int Depth, unsigned int ArraySize, unsigned char Cube, VkFormat PixelFormat, uint32_t Binding, struct ImageGPUInfo* Info, const char* DebugName)
 {
-	size_t img_size = Width * Height * Depth;
-
 	BufferResource_t buf_img_upload;
 	buffer_create(&buf_img_upload, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -250,7 +248,7 @@ VkResult UploadImage(void* FirstPixel, size_t total_size, unsigned int Width, un
 		.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		);
 
-	vkpt_submit_command_buffer_simple(cmd_buf, qvk.queue_graphics, qtrue);
+	vkpt_submit_command_buffer_simple(cmd_buf, qvk.queue_graphics, true);
 
 
 	VkDescriptorImageInfo desc_img_info = {
@@ -283,18 +281,18 @@ VkResult UploadImage(void* FirstPixel, size_t total_size, unsigned int Width, un
 
 #define ISBITMASK(header,r,g,b,a) ( header.RBitMask == r && header.GBitMask == g && header.BBitMask == b && header.ABitMask == a )
 
-qboolean LoadImageFromDDS(const char* FileName, uint32_t Binding, struct ImageGPUInfo* Info, const char* DebugName)
+bool LoadImageFromDDS(const char* FileName, uint32_t Binding, struct ImageGPUInfo* Info, const char* DebugName)
 {
 	unsigned char* data = NULL;
-	ssize_t len = FS_LoadFile(FileName, (void**)&data);
+	int len = FS_LoadFile(FileName, (void**)&data);
 
 	if (!data)
 	{
 		Com_EPrintf("Couldn't read file %s\n", FileName);
-		return qfalse;
+		return false;
 	}
 
-	qboolean retval = qfalse;
+	bool retval = false;
 
 	const DDS_HEADER* dds = (DDS_HEADER*)data;
 	const DDS_HEADER_DXT10* dxt10 = (DDS_HEADER_DXT10*)(data + sizeof(DDS_HEADER));
@@ -364,7 +362,7 @@ VkDescriptorSet SkyGetDescriptorSet()
 }
 
 VkResult
-vkpt_uniform_precomputed_buffer_create()
+vkpt_uniform_precomputed_buffer_create(void)
 {
 	VkDescriptorSetLayoutBinding ubo_layout_binding = {
 		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -386,7 +384,7 @@ vkpt_uniform_precomputed_buffer_create()
 			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-		ATTACH_LABEL_VARIABLE_NAME(atmosphere_params_buffer.buffer, IMAGE_VIEW, "AtmosphereParameters");
+		buffer_attach_name(&atmosphere_params_buffer, "AtmosphereParameters");
 	}
 
 	VkDescriptorPoolSize pool_size = {
@@ -439,7 +437,7 @@ vkpt_uniform_precomputed_buffer_create()
 }
 
 VkResult
-vkpt_uniform_precomputed_buffer_destroy()
+vkpt_uniform_precomputed_buffer_destroy(void)
 {
 	vkDestroyDescriptorPool(qvk.device, desc_pool_precomputed_ubo, NULL);
 	vkDestroyDescriptorSetLayout(qvk.device, uniform_precomputed_descriptor_layout, NULL);
@@ -452,7 +450,7 @@ vkpt_uniform_precomputed_buffer_destroy()
 }
 
 VkResult
-vkpt_uniform_precomputed_buffer_update()
+vkpt_uniform_precomputed_buffer_update(void)
 {
 	BufferResource_t *ubo = &atmosphere_params_buffer;
 	assert(ubo->memory != VK_NULL_HANDLE);
@@ -564,7 +562,7 @@ void UpdateTerrainShadowMapView(vec3_t forward)
 
 VkResult SkyLoadScatterParameters(SkyPreset preset)
 {
-	const char* Planet;
+	const char* Planet = "UNKNOWN";
 
 	if (preset == SKY_EARTH)
 	{
@@ -680,9 +678,8 @@ struct ShadowmapGeometry FillVertexAndIndexBuffers(const char* FileName, unsigne
 {
 	struct  ShadowmapGeometry result = { 0 };
 
-
 	unsigned char* file_data = NULL;
-	ssize_t file_len = FS_LoadFile(FileName, (void**)&file_data);
+	FS_LoadFile(FileName, (void**)&file_data);
 
 	if (!file_data)
 	{
@@ -769,14 +766,14 @@ struct ShadowmapGeometry FillVertexAndIndexBuffers(const char* FileName, unsigne
 	buffer_create(&result.Vertexes, VertexBufferSize,
 		VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	ATTACH_LABEL_VARIABLE_NAME(result.Vertexes.buffer, BUFFER, "Shadowmap Vertex Buffer");
+	buffer_attach_name(&result.Vertexes, "Shadowmap Vertex Buffer");
 
 	buffer_create(&result.Indexes, IndexBufferSize,
 		VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	ATTACH_LABEL_VARIABLE_NAME(result.Indexes.buffer, BUFFER, "Shadowmap Index Buffer");
+	buffer_attach_name(&result.Indexes, "Shadowmap Index Buffer");
 
-	VkCommandBuffer cmd_buf = vkpt_begin_command_buffer(&qvk.cmd_buffers_transfer);
+	VkCommandBuffer cmd_buf = vkpt_begin_command_buffer(&qvk.cmd_buffers_graphics);
 
 	BUFFER_BARRIER(cmd_buf, 
 		.buffer = upload_buffer.buffer, 
@@ -834,9 +831,9 @@ struct ShadowmapGeometry FillVertexAndIndexBuffers(const char* FileName, unsigne
 		.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-	vkpt_submit_command_buffer_simple(cmd_buf, qvk.queue_transfer, qtrue);
+	vkpt_submit_command_buffer_simple(cmd_buf, qvk.queue_graphics, true);
 
-	vkQueueWaitIdle(qvk.queue_transfer);
+	vkQueueWaitIdle(qvk.queue_graphics);
 	buffer_destroy(&upload_buffer);
 
 done:
@@ -886,7 +883,7 @@ void CreateShadowMap(struct Shadowmap* InOutShadowmap)
 	};
 
 	_VK(vkCreateImage(qvk.device, &ShadowTexInfo, NULL, &InOutShadowmap->TargetTexture));
-	ATTACH_LABEL_VARIABLE_NAME(InOutShadowmap->TargetTexture, IMAGE_VIEW, "EnvShadowMap");
+	ATTACH_LABEL_VARIABLE_NAME(InOutShadowmap->TargetTexture, IMAGE, "EnvShadowMap");
 
 	VkMemoryRequirements memReqs = {0};
 	vkGetImageMemoryRequirements(qvk.device, InOutShadowmap->TargetTexture, &memReqs);
@@ -906,12 +903,13 @@ void CreateShadowMap(struct Shadowmap* InOutShadowmap)
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
 		.format = InOutShadowmap->DepthFormat,
-		.subresourceRange = {0},
-		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-		.subresourceRange.baseMipLevel = 0,
-		.subresourceRange.levelCount = 1,
-		.subresourceRange.baseArrayLayer = 0,
-		.subresourceRange.layerCount = 1,
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		},
 		.image = InOutShadowmap->TargetTexture,
 	};
 
@@ -1037,8 +1035,6 @@ void RecordCommandBufferShadowmap(VkCommandBuffer cmd_buf)
 	};
 
 	vkCmdSetScissor(cmd_buf, 0, 1, &rect2D);
-	float depthBiasConstant = 0.f;
-	float depthBiasSlope = 0.f;
 
 	vkCmdPushConstants(cmd_buf, pipeline_layout_smap, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, terrain_shadowmap_viewproj);
 

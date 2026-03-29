@@ -19,8 +19,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "vkpt.h"
 
-void
-create_entity_matrix(float matrix[16], entity_t *e, qboolean enable_left_hand)
+static void
+internal_create_entity_matrix(mat4_t matrix, entity_t *e, bool mirror)
 {
 	vec3_t axis[3];
 	vec3_t origin;
@@ -33,7 +33,7 @@ create_entity_matrix(float matrix[16], entity_t *e, qboolean enable_left_hand)
 	float scale = (e->scale > 0.f) ? e->scale : 1.f;
 
 	vec3_t scales = { scale, scale, scale };
-	if ((e->flags & RF_LEFTHAND) && enable_left_hand)
+	if (mirror)
 	{
 		scales[1] *= -1.f;
 	}
@@ -60,7 +60,66 @@ create_entity_matrix(float matrix[16], entity_t *e, qboolean enable_left_hand)
 }
 
 void
-create_projection_matrix(float matrix[16], float znear, float zfar, float fov_x, float fov_y)
+create_entity_matrix(mat4_t matrix, entity_t *e)
+{
+	internal_create_entity_matrix(matrix, e, false);
+}
+
+void
+create_viewweapon_matrix(mat4_t matrix, entity_t *e)
+{
+	extern cvar_t   *info_hand;
+	extern cvar_t   *cl_adjustfov;
+	extern cvar_t   *cl_gunfov;
+
+	internal_create_entity_matrix(matrix, e, info_hand->integer == 1);
+
+	if (cl_gunfov->value > 0) {
+		float gunfov_x, gunfov_y;
+		gunfov_x = Cvar_ClampValue(cl_gunfov, 30, 160);
+		if (cl_adjustfov->integer) {
+			gunfov_y = V_CalcFov(gunfov_x, 4, 3);
+			gunfov_x = V_CalcFov(gunfov_y, vkpt_refdef.fd->height, vkpt_refdef.fd->width);
+		} else {
+			gunfov_y = V_CalcFov(gunfov_x, vkpt_refdef.fd->width, vkpt_refdef.fd->height);
+		}
+
+		/* Construct a matrix for the viewweapon entity so, after projection and all,
+		 * it appears to be rendered with the gun FOV (which may differ from the view FOV). */
+		mat4_t tmp;
+		mult_matrix_matrix(tmp, vkpt_refdef.view_matrix, matrix);
+
+		mat4_t adjust;
+		adjust[0] = tan(vkpt_refdef.fd->fov_x * M_PI / 360.0) / tan(gunfov_x * M_PI / 360.0);
+		adjust[4] = 0;
+		adjust[8] = 0;
+		adjust[12] = 0;
+
+		adjust[1] = 0;
+		adjust[5] = tan(vkpt_refdef.fd->fov_y * M_PI / 360.0) / tan(gunfov_y * M_PI / 360.0);
+		adjust[9] = 0;
+		adjust[13] = 0;
+
+		adjust[2] = 0;
+		adjust[6] = 0;
+		adjust[10] = 1;
+		adjust[14] = 0;
+
+		adjust[3] = 0;
+		adjust[7] = 0;
+		adjust[11] = 0;
+		adjust[15] = 1;
+
+		mat4_t tmp2;
+		mult_matrix_matrix(tmp2, adjust, tmp);
+
+		mult_matrix_matrix(matrix, vkpt_refdef.view_matrix_inv, tmp2);
+	}
+
+}
+
+void
+create_projection_matrix(mat4_t matrix, float znear, float zfar, float fov_x, float fov_y)
 {
 	float xmin, xmax, ymin, ymax;
 	float width, height, depth;
@@ -97,7 +156,7 @@ create_projection_matrix(float matrix[16], float znear, float zfar, float fov_x,
 }
 
 void
-create_orthographic_matrix(float matrix[16], float xmin, float xmax,
+create_orthographic_matrix(mat4_t matrix, float xmin, float xmax,
 		float ymin, float ymax, float znear, float zfar)
 {
 	float width, height, depth;
@@ -128,7 +187,7 @@ create_orthographic_matrix(float matrix[16], float xmin, float xmax,
 }
 
 void
-create_view_matrix(float matrix[16], refdef_t *fd)
+create_view_matrix(mat4_t matrix, refdef_t *fd)
 {
 	vec3_t viewaxis[3];
 	AnglesToAxis(fd->viewangles, viewaxis);
@@ -155,7 +214,7 @@ create_view_matrix(float matrix[16], refdef_t *fd)
 }
 
 void
-inverse(const float *m, float *inv)
+inverse(const mat4_t m, mat4_t inv)
 {
 	inv[0] = m[5]  * m[10] * m[15] -
 	         m[5]  * m[11] * m[14] -
@@ -278,7 +337,7 @@ inverse(const float *m, float *inv)
 }
 
 void
-mult_matrix_matrix(float *p, const float *a, const float *b)
+mult_matrix_matrix(mat4_t p, const mat4_t a, const mat4_t b)
 {
 	for(int i = 0; i < 4; i++) {
 		for(int j = 0; j < 4; j++) {
@@ -292,15 +351,14 @@ mult_matrix_matrix(float *p, const float *a, const float *b)
 }
 
 void
-mult_matrix_vector(float *p, const float *a, const float *b)
+mult_matrix_vector(vec4_t v, const mat4_t a, const vec4_t b)
 {
 	int j;
 	for (j = 0; j < 4; j++) {
-		p[j] =
+		v[j] =
 			a[0 * 4 + j] * b[0] +
 			a[1 * 4 + j] * b[1] +
 			a[2 * 4 + j] * b[2] +
 			a[3 * 4 + j] * b[3];
 	}
 }
-

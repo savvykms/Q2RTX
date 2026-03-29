@@ -65,7 +65,7 @@ static void setup_dotshading(void)
     shadedir[2] = -sp;
 }
 
-static inline vec_t shadedot(const vec_t *normal)
+static inline vec_t shadedot(const vec3_t normal)
 {
     vec_t d = DotProduct(normal, shadedir);
 
@@ -77,7 +77,7 @@ static inline vec_t shadedot(const vec_t *normal)
     return d + 1;
 }
 
-static inline vec_t *get_static_normal(vec_t *normal, const maliasvert_t *vert)
+static inline vec_t *get_static_normal(vec3_t normal, const maliasvert_t *vert)
 {
     unsigned int lat = vert->norm[0];
     unsigned int lng = vert->norm[1];
@@ -91,7 +91,7 @@ static inline vec_t *get_static_normal(vec_t *normal, const maliasvert_t *vert)
 
 static void tess_static_shell(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
     vec3_t normal;
@@ -113,14 +113,13 @@ static void tess_static_shell(const maliasmesh_t *mesh)
 
 static void tess_static_shade(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
     vec3_t normal;
-    vec_t d;
 
     while (count--) {
-        d = shadedot(get_static_normal(normal, src_vert));
+        vec_t d = shadedot(get_static_normal(normal, src_vert));
 
         dst_vert[0] = src_vert->pos[0] * newscale[0] + translate[0];
         dst_vert[1] = src_vert->pos[1] * newscale[1] + translate[1];
@@ -137,7 +136,7 @@ static void tess_static_shade(const maliasmesh_t *mesh)
 
 static void tess_static_plain(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_vert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
 
@@ -151,12 +150,12 @@ static void tess_static_plain(const maliasmesh_t *mesh)
     }
 }
 
-static inline vec_t *get_lerped_normal(vec_t *normal,
+static inline vec_t *get_lerped_normal(vec3_t normal,
                                        const maliasvert_t *oldvert,
                                        const maliasvert_t *newvert)
 {
     vec3_t oldnorm, newnorm, tmp;
-    vec_t len;
+    vec_t scale;
 
     get_static_normal(oldnorm, oldvert);
     get_static_normal(newnorm, newvert);
@@ -164,16 +163,16 @@ static inline vec_t *get_lerped_normal(vec_t *normal,
     LerpVector2(oldnorm, newnorm, backlerp, frontlerp, tmp);
 
     // normalize result
-    len = 1 / VectorLength(tmp);
-    VectorScale(tmp, len, normal);
+    scale = 1.0f / VectorLength(tmp);
+    VectorScale(tmp, scale, normal);
 
     return normal;
 }
 
 static void tess_lerped_shell(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
-    maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
+    const maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
     vec3_t normal;
@@ -199,15 +198,14 @@ static void tess_lerped_shell(const maliasmesh_t *mesh)
 
 static void tess_lerped_shade(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
-    maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
+    const maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
     vec3_t normal;
-    vec_t d;
 
     while (count--) {
-        d = shadedot(get_lerped_normal(normal, src_oldvert, src_newvert));
+        vec_t d = shadedot(get_lerped_normal(normal, src_oldvert, src_newvert));
 
         dst_vert[0] =
             src_oldvert->pos[0] * oldscale[0] +
@@ -231,8 +229,8 @@ static void tess_lerped_shade(const maliasmesh_t *mesh)
 
 static void tess_lerped_plain(const maliasmesh_t *mesh)
 {
-    maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
-    maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
+    const maliasvert_t *src_oldvert = &mesh->verts[oldframenum * mesh->numverts];
+    const maliasvert_t *src_newvert = &mesh->verts[newframenum * mesh->numverts];
     vec_t *dst_vert = tess.vertices;
     int count = mesh->numverts;
 
@@ -253,13 +251,15 @@ static void tess_lerped_plain(const maliasmesh_t *mesh)
     }
 }
 
-static glCullResult_t cull_static_model(model_t *model)
+static glCullResult_t cull_static_model(const model_t *model)
 {
-    maliasframe_t *newframe = &model->frames[newframenum];
+    const maliasframe_t *newframe = &model->frames[newframenum];
     vec3_t bounds[2];
     glCullResult_t cull;
 
-    if (glr.entrotated) {
+    if (glr.ent->flags & RF_WEAPONMODEL) {
+        cull = CULL_IN;
+    } else if (glr.entrotated) {
         cull = GL_CullSphere(origin, newframe->radius);
         if (cull == CULL_OUT) {
             c.spheresCulled++;
@@ -288,18 +288,17 @@ static glCullResult_t cull_static_model(model_t *model)
     return cull;
 }
 
-static glCullResult_t cull_lerped_model(model_t *model)
+static glCullResult_t cull_lerped_model(const model_t *model)
 {
-    maliasframe_t *newframe = &model->frames[newframenum];
-    maliasframe_t *oldframe = &model->frames[oldframenum];
+    const maliasframe_t *newframe = &model->frames[newframenum];
+    const maliasframe_t *oldframe = &model->frames[oldframenum];
     vec3_t bounds[2];
-    vec_t radius;
     glCullResult_t cull;
 
-    if (glr.entrotated) {
-        radius = newframe->radius > oldframe->radius ?
-                 newframe->radius : oldframe->radius;
-        cull = GL_CullSphere(origin, radius);
+    if (glr.ent->flags & RF_WEAPONMODEL) {
+        cull = CULL_IN;
+    } else if (glr.entrotated) {
+        cull = GL_CullSphere(origin, max(newframe->radius, oldframe->radius));
         if (cull == CULL_OUT) {
             c.spheresCulled++;
             return cull;
@@ -342,6 +341,9 @@ static void setup_color(void)
 
     if (flags & RF_SHELL_MASK) {
         VectorClear(color);
+        if (flags & RF_SHELL_LITE_GREEN) {
+            VectorSet(color, 0.56f, 0.93f, 0.56f);
+        }
         if (flags & RF_SHELL_HALF_DAM) {
             color[0] = 0.56f;
             color[1] = 0.59f;
@@ -388,9 +390,9 @@ static void setup_color(void)
             }
         }
 
-        for (i = 0; i < 3; i++) {
-            clamp(color[i], 0, 1);
-        }
+        color[0] = Q_clipf(color[0], 0, 1);
+        color[1] = Q_clipf(color[1], 0, 1);
+        color[2] = Q_clipf(color[2], 0, 1);
     }
 
     if (flags & RF_TRANSLUCENT) {
@@ -403,7 +405,6 @@ static void setup_color(void)
 static void setup_celshading(void)
 {
     float value = Cvar_ClampValue(gl_celshading, 0, 10);
-    vec3_t dir;
 
     celscale = 0;
 
@@ -413,11 +414,13 @@ static void setup_celshading(void)
     if (glr.ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK))
         return;
 
-    VectorSubtract(origin, glr.fd.vieworg, dir);
-    celscale = 1.0f - VectorLength(dir) / 700.0f;
+    if (!qglPolygonMode)
+        return;
+
+    celscale = 1.0f - Distance(origin, glr.fd.vieworg) / 700.0f;
 }
 
-static void draw_celshading(maliasmesh_t *mesh)
+static void draw_celshading(const maliasmesh_t *mesh)
 {
     if (celscale < 0.01f || celscale > 1)
         return;
@@ -429,7 +432,7 @@ static void draw_celshading(maliasmesh_t *mesh)
     qglLineWidth(gl_celshading->value * celscale);
     qglPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     qglCullFace(GL_FRONT);
-    qglColor4f(0, 0, 0, color[3] * celscale);
+    GL_Color(0, 0, 0, color[3] * celscale);
     qglDrawElements(GL_TRIANGLES, mesh->numindices, QGL_INDEX_ENUM,
                     mesh->indices);
     qglCullFace(GL_BACK);
@@ -437,10 +440,32 @@ static void draw_celshading(maliasmesh_t *mesh)
     qglLineWidth(1);
 }
 
+static void proj_matrix(GLfloat *matrix, const cplane_t *plane, const vec3_t dir)
+{
+    matrix[0] = plane->normal[1] * dir[1] + plane->normal[2] * dir[2];
+    matrix[4] = -plane->normal[1] * dir[0];
+    matrix[8] = -plane->normal[2] * dir[0];
+    matrix[12] = plane->dist * dir[0];
+
+    matrix[1] = -plane->normal[0] * dir[1];
+    matrix[5] = plane->normal[0] * dir[0] + plane->normal[2] * dir[2];
+    matrix[9] = -plane->normal[2] * dir[1];
+    matrix[13] = plane->dist * dir[1];
+
+    matrix[2] = -plane->normal[0] * dir[2];
+    matrix[6] = -plane->normal[1] * dir[2];
+    matrix[10] = plane->normal[0] * dir[0] + plane->normal[1] * dir[1];
+    matrix[14] = plane->dist * dir[2];
+
+    matrix[3] = 0;
+    matrix[7] = 0;
+    matrix[11] = 0;
+    matrix[15] = DotProduct(plane->normal, dir);
+}
+
 static void setup_shadow(void)
 {
     GLfloat matrix[16], tmp[16];
-    cplane_t *plane;
     vec3_t dir;
 
     shadowmatrix[15] = 0;
@@ -461,55 +486,15 @@ static void setup_shadow(void)
         VectorSet(dir, 0, 0, 1);
 
     // project shadow on ground plane
-    plane = &glr.lightpoint.plane;
-
-    matrix[0] = plane->normal[1] * dir[1] + plane->normal[2] * dir[2];
-    matrix[4] = -plane->normal[1] * dir[0];
-    matrix[8] = -plane->normal[2] * dir[0];
-    matrix[12] = plane->dist * dir[0];
-
-    matrix[1] = -plane->normal[0] * dir[1];
-    matrix[5] = plane->normal[0] * dir[0] + plane->normal[2] * dir[2];
-    matrix[9] = -plane->normal[2] * dir[1];
-    matrix[13] = plane->dist * dir[1];
-
-    matrix[2] = -plane->normal[0] * dir[2];
-    matrix[6] = -plane->normal[1] * dir[2];
-    matrix[10] = plane->normal[0] * dir[0] + plane->normal[1] * dir[1];
-    matrix[14] = plane->dist * dir[2];
-
-    matrix[3] = 0;
-    matrix[7] = 0;
-    matrix[11] = 0;
-    matrix[15] = DotProduct(plane->normal, dir);
-
+    proj_matrix(matrix, &glr.lightpoint.plane, dir);
     GL_MultMatrix(tmp, glr.viewmatrix, matrix);
 
     // rotate for entity
-    matrix[0] = glr.entaxis[0][0];
-    matrix[4] = glr.entaxis[1][0];
-    matrix[8] = glr.entaxis[2][0];
-    matrix[12] = origin[0];
-
-    matrix[1] = glr.entaxis[0][1];
-    matrix[5] = glr.entaxis[1][1];
-    matrix[9] = glr.entaxis[2][1];
-    matrix[13] = origin[1];
-
-    matrix[2] = glr.entaxis[0][2];
-    matrix[6] = glr.entaxis[1][2];
-    matrix[10] = glr.entaxis[2][2];
-    matrix[14] = origin[2];
-
-    matrix[3] = 0;
-    matrix[7] = 0;
-    matrix[11] = 0;
-    matrix[15] = 1;
-
+    GL_RotationMatrix(matrix);
     GL_MultMatrix(shadowmatrix, tmp, matrix);
 }
 
-static void draw_shadow(maliasmesh_t *mesh)
+static void draw_shadow(const maliasmesh_t *mesh)
 {
     if (shadowmatrix[15] < 0.5f)
         return;
@@ -530,7 +515,7 @@ static void draw_shadow(maliasmesh_t *mesh)
 
     qglEnable(GL_POLYGON_OFFSET_FILL);
     qglPolygonOffset(-1.0f, -2.0f);
-    qglColor4f(0, 0, 0, color[3] * 0.5f);
+    GL_Color(0, 0, 0, color[3] * 0.5f);
     qglDrawElements(GL_TRIANGLES, mesh->numindices, QGL_INDEX_ENUM,
                     mesh->indices);
     qglDisable(GL_POLYGON_OFFSET_FILL);
@@ -544,9 +529,9 @@ static void draw_shadow(maliasmesh_t *mesh)
     }
 }
 
-static int texnum_for_mesh(maliasmesh_t *mesh)
+static int texnum_for_mesh(const maliasmesh_t *mesh)
 {
-    entity_t *ent = glr.ent;
+    const entity_t *ent = glr.ent;
 
     if (ent->flags & RF_SHELL_MASK)
         return TEXNUM_WHITE;
@@ -568,9 +553,9 @@ static int texnum_for_mesh(maliasmesh_t *mesh)
     return mesh->skins[ent->skinnum]->texnum;
 }
 
-static void draw_alias_mesh(maliasmesh_t *mesh)
+static void draw_alias_mesh(const maliasmesh_t *mesh)
 {
-    glStateBits_t state = GLS_DEFAULT;
+    glStateBits_t state = GLS_INTENSITY_ENABLE;
 
     // fall back to entity matrix
     GL_LoadMatrix(glr.entmatrix);
@@ -579,7 +564,10 @@ static void draw_alias_mesh(maliasmesh_t *mesh)
         state |= GLS_SHADE_SMOOTH;
 
     if (glr.ent->flags & RF_TRANSLUCENT)
-        state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
+        state |= GLS_BLEND_BLEND;
+
+    if ((glr.ent->flags & (RF_TRANSLUCENT | RF_WEAPONMODEL)) == RF_TRANSLUCENT)
+        state |= GLS_DEPTHMASK_FALSE;
 
     GL_StateBits(state);
 
@@ -595,7 +583,7 @@ static void draw_alias_mesh(maliasmesh_t *mesh)
     } else {
         GL_ArrayBits(GLA_VERTEX | GLA_TC);
         GL_VertexPointer(3, 4, tess.vertices);
-        qglColor4fv(color);
+        GL_Color(color[0], color[1], color[2], color[3]);
     }
 
     GL_TexCoordPointer(2, 0, (GLfloat *)mesh->tcoords);
@@ -608,10 +596,7 @@ static void draw_alias_mesh(maliasmesh_t *mesh)
     draw_celshading(mesh);
 
     if (gl_showtris->integer) {
-        GL_EnableOutlines();
-        qglDrawElements(GL_TRIANGLES, mesh->numindices, QGL_INDEX_ENUM,
-                        mesh->indices);
-        GL_DisableOutlines();
+        GL_DrawOutlines(mesh->numindices, mesh->indices);
     }
 
     // FIXME: unlock arrays before changing matrix?
@@ -620,9 +605,40 @@ static void draw_alias_mesh(maliasmesh_t *mesh)
     GL_UnlockArrays();
 }
 
-void GL_DrawAliasModel(model_t *model)
+// extra ugly. this needs to be done on the client, but to avoid complexity of
+// rendering gun model in its own refdef, and to preserve compatibility with
+// existing RF_WEAPONMODEL flag, we do it here.
+static void setup_weaponmodel(void)
 {
-    entity_t *ent = glr.ent;
+    extern cvar_t   *info_hand;
+    extern cvar_t   *cl_adjustfov;
+    extern cvar_t   *cl_gunfov;
+
+    float fov_x = glr.fd.fov_x;
+    float fov_y = glr.fd.fov_y;
+    float reflect_x = 1.0f;
+
+    if (cl_gunfov->value > 0) {
+        fov_x = Cvar_ClampValue(cl_gunfov, 30, 160);
+        if (cl_adjustfov->integer) {
+            fov_y = V_CalcFov(fov_x, 4, 3);
+            fov_x = V_CalcFov(fov_y, glr.fd.height, glr.fd.width);
+        } else {
+            fov_y = V_CalcFov(fov_x, glr.fd.width, glr.fd.height);
+        }
+    }
+
+    if (info_hand->integer == 1) {
+        reflect_x = -1.0f;
+        qglFrontFace(GL_CCW);
+    }
+
+    GL_Frustum(fov_x, fov_y, reflect_x, min(glr.ent->scale, 1.0f));
+}
+
+void GL_DrawAliasModel(const model_t *model)
+{
+    const entity_t *ent = glr.ent;
     glCullResult_t cull;
     int i;
 
@@ -645,12 +661,7 @@ void GL_DrawAliasModel(model_t *model)
     if (backlerp == 0)
         oldframenum = newframenum;
 
-    // interpolate origin, if necessarry
-    if (ent->flags & RF_FRAMELERP)
-        LerpVector2(ent->oldorigin, ent->origin,
-                    backlerp, frontlerp, origin);
-    else
-        VectorCopy(ent->origin, origin);
+    VectorCopy(ent->origin, origin);
 
     // cull the model, setup scale and translate vectors
     if (newframenum == oldframenum)
@@ -680,35 +691,23 @@ void GL_DrawAliasModel(model_t *model)
             tess_static_plain : tess_lerped_plain;
     }
 
-	float scale = 1.f;
-	if (ent->scale > 0.f)
-		scale = ent->scale;
+    GL_RotateForEntity();
 
-    GL_RotateForEntity(origin, scale);
-
-    if ((ent->flags & (RF_WEAPONMODEL | RF_LEFTHAND)) ==
-        (RF_WEAPONMODEL | RF_LEFTHAND)) {
-        qglMatrixMode(GL_PROJECTION);
-        qglScalef(-1, 1, 1);
-        qglMatrixMode(GL_MODELVIEW);
-        qglFrontFace(GL_CCW);
-    }
+    if (ent->flags & RF_WEAPONMODEL)
+        setup_weaponmodel();
 
     if (ent->flags & RF_DEPTHHACK)
-        qglDepthRange(0, 0.25f);
+        GL_DepthRange(0, 0.25f);
 
     // draw all the meshes
     for (i = 0; i < model->nummeshes; i++)
         draw_alias_mesh(&model->meshes[i]);
 
     if (ent->flags & RF_DEPTHHACK)
-        qglDepthRange(0, 1);
+        GL_DepthRange(0, 1);
 
-    if ((ent->flags & (RF_WEAPONMODEL | RF_LEFTHAND)) ==
-        (RF_WEAPONMODEL | RF_LEFTHAND)) {
-        qglMatrixMode(GL_PROJECTION);
-        qglScalef(-1, 1, 1);
-        qglMatrixMode(GL_MODELVIEW);
+    if (ent->flags & RF_WEAPONMODEL) {
+        GL_Frustum(glr.fd.fov_x, glr.fd.fov_y, 1.0f, 1.0f);
         qglFrontFace(GL_CW);
     }
 }

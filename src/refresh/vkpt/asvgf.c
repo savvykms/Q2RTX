@@ -161,7 +161,7 @@ vkpt_asvgf_create_pipelines()
 		[TAAU] = {
 			.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
 			.stage  = SHADER_STAGE(QVK_MOD_ASVGF_TAAU_COMP, VK_SHADER_STAGE_COMPUTE_BIT),
-			.layout = pipeline_layout_general,
+			.layout = pipeline_layout_taa,
 		},
 		[COMPOSITING] = {
 			.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -230,7 +230,7 @@ vkpt_asvgf_gradient_reproject(VkCommandBuffer cmd_buf)
 }
 
 VkResult
-vkpt_asvgf_filter(VkCommandBuffer cmd_buf, qboolean enable_lf)
+vkpt_asvgf_filter(VkCommandBuffer cmd_buf, bool enable_lf)
 {
 	VkDescriptorSet desc_sets[] = {
 		qvk.desc_set_ubo,

@@ -20,32 +20,30 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 void GL_SampleLightPoint(vec3_t color)
 {
-    mface_t         *surf;
+    mface_t         *surf = glr.lightpoint.surf;
     int             s, t, i;
     byte            *lightmap;
     byte            *b1, *b2, *b3, *b4;
-    int             fracu, fracv;
-    int             w1, w2, w3, w4;
-    byte            temp[3];
+    float           fracu, fracv;
+    float           w1, w2, w3, w4;
+    vec3_t          temp;
     int             smax, tmax, size;
     lightstyle_t    *style;
 
-    fracu = glr.lightpoint.s & 15;
-    fracv = glr.lightpoint.t & 15;
+    s = glr.lightpoint.s;
+    t = glr.lightpoint.t;
+
+    fracu = glr.lightpoint.s - s;
+    fracv = glr.lightpoint.t - t;
 
     // compute weights of lightmap blocks
-    w1 = (16 - fracu) * (16 - fracv);
-    w2 = fracu * (16 - fracv);
+    w1 = (1.0f - fracu) * (1.0f - fracv);
+    w2 = fracu * (1.0f - fracv);
     w3 = fracu * fracv;
-    w4 = (16 - fracu) * fracv;
+    w4 = (1.0f - fracu) * fracv;
 
-    s = glr.lightpoint.s >> 4;
-    t = glr.lightpoint.t >> 4;
-
-    surf = glr.lightpoint.surf;
-
-    smax = S_MAX(surf);
-    tmax = T_MAX(surf);
+    smax = surf->lm_width;
+    tmax = surf->lm_height;
     size = smax * tmax * 3;
 
     VectorClear(color);
@@ -58,21 +56,21 @@ void GL_SampleLightPoint(vec3_t color)
         b3 = &lightmap[3 * ((t + 1) * smax + (s + 1))];
         b4 = &lightmap[3 * ((t + 1) * smax + (s + 0))];
 
-        temp[0] = (w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0]) >> 8;
-        temp[1] = (w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1]) >> 8;
-        temp[2] = (w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2]) >> 8;
+        temp[0] = w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
+        temp[1] = w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
+        temp[2] = w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
 
         style = LIGHT_STYLE(surf, i);
 
-        color[0] += temp[0] * style->rgb[0];
-        color[1] += temp[1] * style->rgb[1];
-        color[2] += temp[2] * style->rgb[2];
+        color[0] += temp[0] * style->white;
+        color[1] += temp[1] * style->white;
+        color[2] += temp[2] * style->white;
 
         lightmap += size;
     }
 }
 
-static qboolean _GL_LightPoint(vec3_t start, vec3_t color)
+static bool _GL_LightPoint(const vec3_t start, vec3_t color)
 {
     bsp_t           *bsp;
     int             i, index;
@@ -84,7 +82,7 @@ static qboolean _GL_LightPoint(vec3_t start, vec3_t color)
 
     bsp = gl_static.world.cache;
     if (!bsp || !bsp->lightmap)
-        return qfalse;
+        return false;
 
     end[0] = start[0];
     end[1] = start[1];
@@ -97,7 +95,7 @@ static qboolean _GL_LightPoint(vec3_t start, vec3_t color)
     for (i = 0; i < glr.fd.num_entities; i++) {
         ent = &glr.fd.entities[i];
         index = ent->model;
-        if (!(index & 0x80000000))
+        if (!(index & BIT(31)))
             break;  // BSP models are at the start of entity array
 
         index = ~index;
@@ -109,10 +107,10 @@ static qboolean _GL_LightPoint(vec3_t start, vec3_t color)
             continue;
 
         // cull in X/Y plane
-        if (ent->angles[0] || ent->angles[1] || ent->angles[2]) {
-            if (fabs(start[0] - ent->origin[0]) > model->radius)
+        if (!VectorEmpty(ent->angles)) {
+            if (fabsf(start[0] - ent->origin[0]) > model->radius)
                 continue;
-            if (fabs(start[1] - ent->origin[1]) > model->radius)
+            if (fabsf(start[1] - ent->origin[1]) > model->radius)
                 continue;
             angles = ent->angles;
         } else {
@@ -133,17 +131,16 @@ static qboolean _GL_LightPoint(vec3_t start, vec3_t color)
     }
 
     if (!glr.lightpoint.surf)
-        return qfalse;
+        return false;
 
     GL_SampleLightPoint(color);
 
     GL_AdjustColor(color);
 
-    return qtrue;
+    return true;
 }
 
-#if USE_DLIGHTS
-static void GL_MarkLights_r(mnode_t *node, dlight_t *light, int lightbit)
+static void GL_MarkLights_r(mnode_t *node, dlight_t *light, unsigned lightbit)
 {
     vec_t dot;
     int count;
@@ -188,8 +185,10 @@ static void GL_MarkLights(void)
     glr.dlightframe++;
 
     for (i = 0, light = glr.fd.dlights; i < glr.fd.num_dlights; i++, light++) {
+        if(light->light_type != DLIGHT_SPHERE)
+            continue;
         VectorCopy(light->origin, light->transformed);
-        GL_MarkLights_r(gl_static.world.cache->nodes, light, 1 << i);
+        GL_MarkLights_r(gl_static.world.cache->nodes, light, BIT(i));
     }
 }
 
@@ -202,21 +201,25 @@ static void GL_TransformLights(mmodel_t *model)
     glr.dlightframe++;
 
     for (i = 0, light = glr.fd.dlights; i < glr.fd.num_dlights; i++, light++) {
+        if(light->light_type != DLIGHT_SPHERE)
+            continue;
         VectorSubtract(light->origin, glr.ent->origin, temp);
         light->transformed[0] = DotProduct(temp, glr.entaxis[0]);
         light->transformed[1] = DotProduct(temp, glr.entaxis[1]);
         light->transformed[2] = DotProduct(temp, glr.entaxis[2]);
-        GL_MarkLights_r(model->headnode, light, 1 << i);
+        GL_MarkLights_r(model->headnode, light, BIT(i));
     }
 }
 
-static void GL_AddLights(vec3_t origin, vec3_t color)
+static void GL_AddLights(const vec3_t origin, vec3_t color)
 {
     dlight_t *light;
     vec_t f;
     int i;
 
     for (i = 0, light = glr.fd.dlights; i < glr.fd.num_dlights; i++, light++) {
+        if(light->light_type != DLIGHT_SPHERE)
+            continue;
         f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, origin);
         if (f > 0) {
             f *= (1.0f / 255);
@@ -224,13 +227,8 @@ static void GL_AddLights(vec3_t origin, vec3_t color)
         }
     }
 }
-#else
-#define GL_MarkLights()             (void)0
-#define GL_TransformLights()        (void)0
-#define GL_AddLights(origin, color) (void)0
-#endif
 
-void GL_LightPoint(vec3_t origin, vec3_t color)
+void GL_LightPoint(const vec3_t origin, vec3_t color)
 {
     if (gl_fullbright->integer) {
         VectorSet(color, 1, 1, 1);
@@ -251,15 +249,13 @@ void GL_LightPoint(vec3_t origin, vec3_t color)
     }
 }
 
-void R_LightPoint_GL(vec3_t origin, vec3_t color)
+void R_LightPoint_GL(const vec3_t origin, vec3_t color)
 {
-    int i;
-
     GL_LightPoint(origin, color);
 
-    for (i = 0; i < 3; i++) {
-        clamp(color[i], 0, 1);
-    }
+    color[0] = Q_clipf(color[0], 0, 1);
+    color[1] = Q_clipf(color[1], 0, 1);
+    color[2] = Q_clipf(color[2], 0, 1);
 }
 
 static void GL_MarkLeaves(void)
@@ -399,7 +395,7 @@ void GL_DrawBspModel(mmodel_t *model)
 
     GL_TransformLights(model);
 
-    GL_RotateForEntity(ent->origin, 1.f);
+    GL_RotateForEntity();
 
     GL_BindArrays();
 
@@ -413,16 +409,13 @@ void GL_DrawBspModel(mmodel_t *model)
         }
 
         // sky faces don't have their polygon built
-        if (face->drawflags & SURF_SKY) {
+        if (face->drawflags & (SURF_SKY | SURF_NODRAW)) {
             continue;
         }
 
-        // alpha faces on transformed inline models are drawn with world GL
-        // matrix. this bug is intentional: some maps exploit this to hide
-        // surfaces that would otherwise be visible.
         if (face->drawflags & SURF_TRANS_MASK) {
             if (model->drawframe != glr.drawframe)
-                GL_AddAlphaFace(face);
+                GL_AddAlphaFace(face, ent);
             continue;
         }
 
@@ -441,15 +434,15 @@ void GL_DrawBspModel(mmodel_t *model)
 }
 
 #define NODE_CLIPPED    0
-#define NODE_UNCLIPPED  15
+#define NODE_UNCLIPPED  (BIT(4) - 1)
 
-static inline qboolean GL_ClipNode(mnode_t *node, int *clipflags)
+static inline bool GL_ClipNode(mnode_t *node, int *clipflags)
 {
     int flags = *clipflags;
     int i, bits, mask;
 
     if (flags == NODE_UNCLIPPED) {
-        return qtrue;
+        return true;
     }
     for (i = 0, mask = 1; i < 4; i++, mask <<= 1) {
         if (flags & mask) {
@@ -458,7 +451,7 @@ static inline qboolean GL_ClipNode(mnode_t *node, int *clipflags)
         bits = BoxOnPlaneSide(node->mins, node->maxs,
                               &glr.frustumPlanes[i]);
         if (bits == BOX_BEHIND) {
-            return qfalse;
+            return false;
         }
         if (bits == BOX_INFRONT) {
             flags |= mask;
@@ -467,7 +460,7 @@ static inline qboolean GL_ClipNode(mnode_t *node, int *clipflags)
 
     *clipflags = flags;
 
-    return qtrue;
+    return true;
 }
 
 static inline void GL_DrawLeaf(mleaf_t *leaf)
@@ -503,8 +496,12 @@ static inline void GL_DrawNode(mnode_t *node)
             continue;
         }
 
+        if (face->drawflags & SURF_NODRAW) {
+            continue;
+        }
+
         if (face->drawflags & SURF_TRANS_MASK) {
-            GL_AddAlphaFace(face);
+            GL_AddAlphaFace(face, &gl_world);
             continue;
         }
 
@@ -566,12 +563,14 @@ void GL_DrawWorld(void)
 
     GL_BindArrays();
 
-    GL_ClearSolidFaces();
+    if (gl_hash_faces->integer)
+        GL_ClearSolidFaces();
 
     GL_WorldNode_r(gl_static.world.cache->nodes,
                    gl_cull_nodes->integer ? NODE_CLIPPED : NODE_UNCLIPPED);
 
-    GL_DrawSolidFaces();
+    if (gl_hash_faces->integer)
+        GL_DrawSolidFaces();
 
     GL_Flush3D();
 

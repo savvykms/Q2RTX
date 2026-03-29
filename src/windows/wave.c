@@ -25,7 +25,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define WAV_MASK                (WAV_BUFFERS - 1)
 #define WAV_BUFFER_SIZE         0x0400
 
-static qboolean wav_init;
+static bool wav_init;
 
 // starts at 0 for disabled
 static int  sample16;
@@ -86,7 +86,7 @@ static void WAVE_Shutdown(void)
     hWaveHdr = 0;
     lpData = NULL;
     lpWaveHdr = NULL;
-    wav_init = qfalse;
+    wav_init = false;
 }
 
 
@@ -138,11 +138,11 @@ static sndinitstat_t WAVE_Init(void)
             return SIS_FAILURE;
         }
 
-        if (MessageBox(NULL,
-                       _T("The sound hardware is in use by another app.\n\n")
-                       _T("Select Retry to try to start sound again or Cancel to run ") _T("q2pro") _T(" with no sound."),
-                       _T("Sound not available"),
-                       MB_RETRYCANCEL | MB_SETFOREGROUND | MB_ICONEXCLAMATION) != IDRETRY) {
+        if (MessageBoxA(NULL,
+                        "The sound hardware is in use by another app.\n\n"
+                        "Select Retry to try to start sound again or Cancel to run " PRODUCT " with no sound.",
+                        "Sound not available",
+                        MB_RETRYCANCEL | MB_SETFOREGROUND | MB_ICONEXCLAMATION) != IDRETRY) {
             Com_DPrintf("hw in use\n");
             return SIS_NOTAVAIL;
         }
@@ -222,7 +222,7 @@ static sndinitstat_t WAVE_Init(void)
     sample16 = (dma.samplebits / 8) - 1;
 
     Com_Printf("Wave sound initialized\n");
-    wav_init = qtrue;
+    wav_init = true;
 
     return SIS_SUCCESS;
 }
@@ -290,7 +290,7 @@ static void WAVE_Submit(void)
     //
     while (((snd_sent - snd_completed) >> sample16) < 8) {
         h = lpWaveHdr + (snd_sent & WAV_MASK);
-        if (paintedtime / 256 <= snd_sent)
+        if (s_paintedtime / 256 <= snd_sent)
             break;
         snd_sent++;
         /*
@@ -318,15 +318,15 @@ The window have been destroyed and recreated
 between a deactivate and an activate.
 ===========
 */
-static void WAVE_Activate(qboolean active)
+static void WAVE_Activate(bool active)
 {
 }
 
-void WAVE_FillAPI(snddmaAPI_t *api)
-{
-    api->Init = WAVE_Init;
-    api->Shutdown = WAVE_Shutdown;
-    api->BeginPainting = WAVE_BeginPainting;
-    api->Submit = WAVE_Submit;
-    api->Activate = WAVE_Activate;
-}
+const snddma_driver_t snddma_wave = {
+    .name = "wave",
+    .init = WAVE_Init,
+    .shutdown = WAVE_Shutdown,
+    .begin_painting = WAVE_BeginPainting,
+    .submit = WAVE_Submit,
+    .activate = WAVE_Activate,
+};

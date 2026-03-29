@@ -16,32 +16,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#ifndef INPUT_H
-#define INPUT_H
+#pragma once
 
 //
 // input.h -- external (non-keyboard) input devices
 //
 
-typedef struct inputAPI_s {
-    qboolean (*Init)(void);
-    void (*Shutdown)(void);
-    void (*Grab)(qboolean grab);
-    void (*Warp)(int x, int y);
-    void (*GetEvents)(void);
-    qboolean (*GetMotion)(int *dx, int *dy);
-} inputAPI_t;
-
-void VID_FillInputAPI(inputAPI_t *api);
-
-const inputAPI_t* IN_GetAPI();
-
-#if USE_DINPUT
-void DI_FillAPI(inputAPI_t *api);
-#endif
-
 void IN_Frame(void);
 void IN_Activate(void);
 void IN_WarpMouse(int x, int y);
-
-#endif // INPUT_H

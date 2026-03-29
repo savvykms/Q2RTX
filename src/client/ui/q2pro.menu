@@ -8,6 +8,12 @@ characters with backslashes.
 Lines are macro expanded at script load time just as usual console commands.
 Any cvars and macros can be referenced.
 
+Maximum line length after expansion is limited to 1024 chars (this is Q2
+command line parser limitation). Menu items of spin control type (‘values’ and
+‘strings’) support special hack that avoids 1024 chars limit by performing
+expansion after command line is parsed: prefix cvar name to be expanded with
+"$$" instead of "$".
+
 Duplicate menu entries override previous ones.  Built-in menus (‘demos’,
 ‘servers’ and ‘players’) can not be overridden.  When user presses ESC while
 disconnected, ‘main’ menu is pushed.  When user presses ESC while spawned in
@@ -61,8 +67,10 @@ color disabled #7f7f7f
 begin video
     //title "Video Setup"
     banner m_banner_video
-    values "video mode" vid_fullscreen windowed $vid_modelist
+    values "video mode" vid_fullscreen windowed $$vid_modelist
+    values "fov scaling" cl_adjustfov vert- hor+
     toggle "vertical sync" gl_swapinterval
+    pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
     range "texture gamma" vid_gamma 1.3 0.3
     toggle "hardware gamma" vid_hwgamma
     range "texture quality" gl_picmip 3 0 -1
@@ -76,6 +84,7 @@ begin video
     pairs "texture intensity" intensity 1x 1 2x 2 3x 3
     range "lightmap saturation" gl_coloredlightmaps 0 1
     range "lightmap brightness" gl_brightness 0 0.3
+    values "rendering backend" gl_shaders legacy shaders
 end
 
 begin options
@@ -96,8 +105,12 @@ end
 begin sound
     title "Sound Setup"
     values "sound engine" s_enable "no sound" "software" "OpenAL"
-    values "hardware access" s_direct "max compatibility" "max performance"
+    range "sound latency" s_mixahead 0.05 0.2
     range "effects volume" s_volume 0 1
+    range "music volume" ogg_volume 0 1
+    toggle "enable music" ogg_enable
+    toggle "shuffle tracks" ogg_shuffle
+    toggle "underwater effect" s_underwater
     values "ambient sounds" s_ambient "no" "yes" "only player's own"
     values "chat beep" cl_chat_sound "disabled" "default" "alternative"
 end
@@ -109,12 +122,10 @@ begin railtrail
     range "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
     range "core width" cl_railcore_width 1 6 1
     range "spiral radius" cl_railspiral_radius 1 6 1
-    pairs "core color" cl_railcore_color \
-        black black red red green green yellow yellow \
-        blue blue cyan cyan magenta magenta white white
-    pairs "spiral color" cl_railspiral_color \
-        black black red red green green yellow yellow \
-        blue blue cyan cyan magenta magenta white white
+    strings "core color" cl_railcore_color \
+        black red green yellow blue cyan magenta white
+    strings "spiral color" cl_railspiral_color \
+        black red green yellow blue cyan magenta white
 end
 
 begin effects
@@ -124,6 +135,7 @@ begin effects
     toggle "entity glowing" cl_noglow ~
     toggle "ground shadows" gl_shadows
     toggle "screen blending" gl_polyblend
+    toggle "screen warping" gl_waterwarp
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
     blank
@@ -133,7 +145,7 @@ end
 begin crosshair
     title "Crosshair Setup"
     values "crosshair type" crosshair none cross dot angle
-    pairs "crosshair scale" ch_scale 1x 1 2x 2 4x 4
+    pairs "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2
     toggle "color by health" ch_health
     range "red channel" ch_red 0 1
     range "green channel" ch_green 0 1
@@ -187,14 +199,15 @@ end
 begin startserver
     //title "Start Server"
     banner m_banner_start_server
-    strings "initial map" _ui_nextserver $com_maplist
+    strings "initial map" _ui_nextserver $$com_maplist
+    values "rules" coop deathmatch cooperative
     field --integer --status "0 - no time limit" --width 3 "time limit" timelimit
     field --integer --status "0 - no frag limit" --width 3 "frag limit" fraglimit
     field --integer --width 3 "max players" maxclients
     field --width 16 "host name" hostname
     blank
     action --align "deathmatch flags..." pushmenu gameflags
-    action --align "begin game!" "forcemenuoff; map $_ui_nextserver force"
+    action --align "begin game!" "forcemenuoff; if $coop == 1 then deathmatch 0 else deathmatch 1; map $_ui_nextserver force"
 end
 
 begin multiplayer
@@ -247,6 +260,7 @@ begin savegame
     savegame save6
     savegame save7
     savegame save8
+    savegame save9
     savegame save10
     savegame save11
     savegame save12
@@ -311,19 +325,12 @@ begin keys
     title "Key Bindings"
     bind "attack" +attack
     bind "next weapon" weapnext
+    bind "previous weapon" weapprev
     bind "walk forward" +forward
     bind "backpedal" +back
-    bind "turn left" +left
-    bind "turn right" +right
     bind "run" +speed
     bind "step left" +moveleft
     bind "step right" +moveright
-    bind "sidestep" +strafe
-    bind "look up" +lookup
-    bind "look down" +lookdown
-    bind "center view" centerview
-    bind "mouse look" +mlook
-    bind "keyboard look" +klook
     bind "up / jump" +moveup
     bind "down / crouch" +movedown
     bind "inventory" inven
@@ -333,6 +340,22 @@ begin keys
     bind "next item" invnext
     bind "help computer" help
     bind "pause game" pause
+    bind "scoreboard" score
+    bind "chat" messagemode
+    blank
+    action --align "legacy keys..." pushmenu legacykeys
+end
+
+begin legacykeys
+    title "Legacy Key Bindings"
+    bind "turn left" +left
+    bind "turn right" +right
+    bind "sidestep" +strafe
+    bind "look up" +lookup
+    bind "look down" +lookdown
+    bind "center view" centerview
+    bind "mouse look" +mlook
+    bind "keyboard look" +klook
 end
 
 begin weapons
@@ -347,4 +370,5 @@ begin weapons
     bind "hyperblaster" "use HyperBlaster"
     bind "railgun" "use Railgun"
     bind "bfg10k" "use BFG10K"
+    bind "grenades" "use Grenades"
 end
