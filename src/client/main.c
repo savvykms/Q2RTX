@@ -1668,7 +1668,14 @@ Called after all downloads are done. Not used for demos.
 void CL_Begin(void)
 {
 #if USE_REF == REF_GL
-    if (!Q_stricmp(cl.gamedir, "gloom")) {
+    //Savvy edit: original q2pro logic to circumvent quake 2 gloom mod's built-in
+    //            OpenGL/ref_gl validation logic would cause a crash when vid_rtx = 1
+    //            gloom's gameplay is heavily affected by lighting, especially for map balance.
+    if (vid_rtx != NULL && vid_rtx->integer == 0
+     && gl_modulate_world != NULL
+     && gl_modulate_entities != NULL
+     && gl_brightness != NULL
+     && !Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
         gl_modulate_world->flags |= CVAR_CHEAT;
         gl_modulate_entities->flags |= CVAR_CHEAT;
