@@ -51,6 +51,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <string.h>
 #include <assert.h>
 
+#ifdef SAVVY_ENTLIGHTS
+#include "refresh/entlights.h"
+#endif
+
 cvar_t *cvar_profiler = NULL;
 cvar_t *cvar_profiler_samples = NULL;
 cvar_t *cvar_profiler_scale = NULL;
@@ -1825,12 +1829,12 @@ static void add_dlight_spot(const dlight_t* light, DynLightData* dynlight_data)
 	}
 }
 
-static void
+static voi
 add_dlights(const dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
 {
 	ubo->num_dyn_lights = 0;
 
-	for (int i = 0; i < num_lights; i++)
+	for (int i = 0; i < num_lights && ubo->num_dyn_lights < MAX_LIGHT_SOURCES; i++)
 	{
 		const dlight_t* light = lights + i;
 
@@ -2940,6 +2944,10 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	
 	add_dlights(vkpt_refdef.fd->dlights, vkpt_refdef.fd->num_dlights, ubo);
 
+#ifdef SAVVY_ENTLIGHTS
+	add_entlights(vkpt_refdef.fd, ubo);
+#endif
+
 	if (wm->num_cameras > 0)
 	{
 		for (int n = 0; n < wm->num_cameras; n++)
@@ -3854,6 +3862,10 @@ R_Init_RTX(bool total)
 	drs_init();
 	vkpt_fsr_init_cvars();
 
+#ifdef SAVVY_ENTLIGHTS
+	entlights_init_cvars();
+#endif
+
 	// Minimum NVIDIA driver version - this is a cvar in case something changes in the future,
 	// and the current test no longer works.
 	cvar_min_driver_version_nvidia = Cvar_Get("min_driver_version_nvidia", "460.82", 0);
@@ -4334,6 +4346,11 @@ R_BeginRegistration_RTX(const char *name)
 		Com_Error(ERR_DROP, "BSP not vis'd; this is required for Q2RTX.");
 	}
 	bsp_world_model = bsp;
+
+#ifdef SAVVY_ENTLIGHTS
+	entlights_preload_entlight_data(bsp);
+#endif
+
 	bsp_mesh_register_textures(bsp);
 	bsp_mesh_create_from_bsp(&vkpt_refdef.bsp_mesh_world, bsp, name);
 	vkpt_light_buffers_create(&vkpt_refdef.bsp_mesh_world);

@@ -23,6 +23,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/error.h"
 
 #define MAX_DLIGHTS     32
+#define MAX_ENTLIGHTS   32 //Savvy edit: entity light support; MAX_DLIGHTS + MAX_ENTLIGHTS
 #define MAX_ENTITIES    2048
 #define MAX_PARTICLES   16384
 #define MAX_LIGHTSTYLES 256
