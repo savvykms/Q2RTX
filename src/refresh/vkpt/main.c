@@ -1829,8 +1829,7 @@ static void add_dlight_spot(const dlight_t* light, DynLightData* dynlight_data)
 	}
 }
 
-static voi
-add_dlights(const dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
+static void add_dlights(const dlight_t* lights, int num_lights, QVKUniformBuffer_t* ubo)
 {
 	ubo->num_dyn_lights = 0;
 

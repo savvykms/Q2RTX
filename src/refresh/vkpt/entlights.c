@@ -2,6 +2,8 @@
 
 #include "entlights.h"
 
+static void bsp_add_entlights(const bsp_t* bsp);
+
 cvar_t    *cvar_show_entlights = NULL;
 cvar_t    *cvar_entlights_enabled = NULL;
 cvar_t    *cvar_entlights_scale = NULL;
@@ -348,7 +350,7 @@ void add_entlights(refdef_t* fd, QVKUniformBuffer_t* ubo)
 		dlight_t* elight = &entlights[i];
 		//dlight_t* elight = (dlight_t*)(entlights + (i * sizeof(dlight_t)));
 
-		float* dynlight_data = (float*)(ubo->sphere_light_data + ubo->num_dyn_lights * 2);
+		float* dynlight_data = (float*)(ubo->dyn_light_data + ubo->num_dyn_lights * 2);
 		float* center = dynlight_data;
 		float* radius = dynlight_data + 3;
 		float* color = dynlight_data + 4;
